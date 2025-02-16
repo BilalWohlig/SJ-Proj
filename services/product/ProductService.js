@@ -1,0 +1,144 @@
+const axios = require('axios');
+class ProductService {
+    async getProduct (pageSize, categoryID) {
+      try {
+        let defaultCategoryID = "11"
+        if(categoryID) {
+          defaultCategoryID = categoryID
+        }
+        const token = await this.getAdminToken()
+        // console.log(token)
+        const response = await axios.get(`https://sparkyjeans.in/rest/V1/products?searchCriteria[pageSize]=${pageSize}&searchCriteria[filterGroups][0][filters][0][field]=category_id&searchCriteria[filterGroups][0][filters][0][value]=${defaultCategoryID}&searchCriteria[sortOrders][0][field]=updated_at`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        return response.data
+      } catch (err) {
+        console.log('Error in getProduct function :: err', err.response)
+        throw new Error(err)
+      }
+    }
+    async getNewDrops (pageSize) {
+      try {
+        let page = 10
+        if(pageSize){
+          page = pageSize
+        }
+        const token = await this.getAdminToken()
+        // console.log(token)
+        const response = await axios.get(`https://sparkyjeans.in/rest/V1/products?searchCriteria[pageSize]=${page}&searchCriteria[sortOrders][0][field]=updated_at`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        for(const ele of response.data.items){
+          const images = ele.media_gallery_entries
+          for(const image of images) {
+            image.file = process.env.BASE_URL + `${image.file}`
+          } 
+          const customAttributes = ele.custom_attributes
+          for(const attribute of customAttributes) {
+            if(attribute.attribute_code === 'image' || attribute.attribute_code === 'small_image' || attribute.attribute_code === 'thumbnail') {
+              attribute.value = process.env.BASE_URL + `${attribute.value}`
+            }
+          }
+        }
+        return response.data
+      } catch (err) {
+        console.log('Error in getProduct function :: err', err.response)
+        throw new Error(err)
+      }
+    }
+    async getCategories() {
+      try {
+        const token = await this.getAdminToken()
+        const response = await axios.get('https://sparkyjeans.in/rest/V1/categories', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        const finalObj = []
+        const allCategoryArray = response.data.children_data[0].children_data
+        for (const category of allCategoryArray) {
+          if(category.is_active && category.children_data.length > 0){
+            const tempCategoryArray = category.children_data
+            for(const temp of tempCategoryArray){
+              if(temp.is_active){
+                finalObj.push({
+                  name: temp.name,
+                  id: temp.id
+                })
+              }
+            }
+          }
+          else{
+            if(category.is_active){
+              finalObj.push({
+                name: category.name,
+                id: category.id
+              })
+            }
+          }
+        }
+        return finalObj
+        // return response.data
+      }
+      catch (err) {
+        console.log('Error in getCategories function :: err', err)
+        throw new Error(err)
+      }
+    }
+    async getCustomerOrders(emailId) {
+      try {
+        const token = await this.getAdminToken()
+        const customerData = await axios.get(`https://sparkyjeans.in/rest/V1/customers/search?searchCriteria[filterGroups][0][filters][0][field]=email&searchCriteria[filterGroups][0][filters][0][value]=${emailId}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        const customerId = customerData.data.items[0].id
+        const response = await axios.get(`https://sparkyjeans.in/rest/V1/orders?searchCriteria[filterGroups][0][filters][0][field]=customer_id&searchCriteria[filterGroups][0][filters][0][value]=${customerId}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        return response.data
+      }
+      catch (err) {
+        console.log('Error in getCustomerOrders function :: err', err)
+        throw new Error(err)
+      }
+
+    }
+    async trackOrder(emailId) {
+      try {
+        const token = await this.getAdminToken()
+        const response = await axios.get('https://sparkyjeans.in/rest/V1/categories', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        })
+        return response.data
+      }
+      catch (err) {
+        console.log('Error in getCategories function :: err', err)
+        throw new Error(err)
+      }
+    }
+    async getAdminToken () {
+      try {
+        const response = await axios.post('https://sparkyjeans.in/rest/V1/integration/admin/token', {
+          username: process.env.MAGENTO_USERNAME,
+          password: process.env.MAGENTO_PASSWORD
+        })
+        return response.data
+      } catch (err) {
+        console.log('Error in getAdminToken function :: err', err)
+        throw new Error(err)
+      }
+    }
+  }
+  
+module.exports = new ProductService()
+  
