@@ -2,6 +2,7 @@ const axios = require('axios');
 class ProductService {
     async getProduct (pageSize, categoryID) {
       try {
+        // First, get size data, then check stock for each size and return data. Same for new drops
         let defaultCategoryID = "11"
         if(categoryID) {
           defaultCategoryID = categoryID
