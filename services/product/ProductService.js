@@ -23,14 +23,39 @@ class ProductService {
       throw new Error(err);
     }
   }
-  async getNewDrops(pageSize = 10) {
+  async placingOrder(email) {
+    try {
+      const token = await this.getAdminToken();
+      const exisitngCustomer = await axios.get(`https://sparkyjeans.in/rest/V1/customers/search?searchCriteria[filterGroups][0][filters][0][field]=email&searchCriteria[filterGroups][0][filters][0][value]=${email}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      if(exisitngCustomer.data.items && exisitngCustomer.data.items.length > 0) {
+        //Send Razorpay link
+
+        //Validate Payment
+
+        //If successful, add record in magento and shiprocket. 
+      }
+      return "No Account"
+    } catch (err) {
+      console.log("Error in getProduct function :: err", err.response);
+      throw new Error(err);
+    }
+  }
+  async getCategoryWiseDrops(pageSize = 10, categoryId, page = 1) {
     try {
       const token = await this.getAdminToken();
       const config = { headers: { Authorization: `Bearer ${token}` } };
-  
+      let category_id = '11'
+      if(categoryId) {
+        category_id = categoryId
+      }
       // Fetch products
       const { data: productsData } = await axios.get(
-        `https://sparkyjeans.in/rest/V1/products?searchCriteria[pageSize]=${pageSize}&searchCriteria[sortOrders][0][field]=updated_at&searchCriteria[filterGroups][0][filters][0][field]=status&searchCriteria[filterGroups][0][filters][0][value]=1&searchCriteria[filterGroups][1][filters][0][field]=visibility&searchCriteria[filterGroups][1][filters][0][value]=4`,
+        `https://sparkyjeans.in/rest/V1/products?searchCriteria[pageSize]=${pageSize}&searchCriteria[currentPage]=${page}&searchCriteria[sortOrders][0][field]=updated_at&searchCriteria[filterGroups][0][filters][0][field]=status&searchCriteria[filterGroups][0][filters][0][value]=1&searchCriteria[filterGroups][1][filters][0][field]=visibility&searchCriteria[filterGroups][1][filters][0][value]=4&searchCriteria[filterGroups][2][filters][0][field]=category_id&searchCriteria[filterGroups][2][filters][0][value]=${category_id}`,
         config
       );
       const products = productsData.items;
@@ -158,6 +183,145 @@ class ProductService {
       );
   
       return processedProducts;
+    } catch (err) {
+      console.error("Error in getNewDrops function:", err);
+      throw new Error(err);
+    }
+  }
+  async getNewDrops(pageSize = 10, page = 1) {
+    try {
+      const token = await this.getAdminToken();
+      const config = { headers: { Authorization: `Bearer ${token}` } };
+
+      // Fetch products
+      const { data: productsData } = await axios.get(
+        `https://sparkyjeans.in/rest/V1/products?searchCriteria[pageSize]=${pageSize}&searchCriteria[currentPage]=${page}&searchCriteria[sortOrders][0][field]=updated_at&searchCriteria[filterGroups][0][filters][0][field]=status&searchCriteria[filterGroups][0][filters][0][value]=1&searchCriteria[filterGroups][1][filters][0][field]=visibility&searchCriteria[filterGroups][1][filters][0][value]=4`,
+        config
+      );
+      const products = productsData.items;
+  
+      // Filter products with valid configurable product options (attribute 144)
+      const validProducts = products.filter((product) => {
+        const options = product.extension_attributes?.configurable_product_options;
+        return (
+          options &&
+          options.length > 0 &&
+          options[0].attribute_id == 144
+        );
+      });
+  
+      // Cache the size attribute labels once
+      const { data: sizeLabelsData } = await axios.get(
+        "https://sparkyjeans.in/rest/V1/products/attributes/144",
+        config
+      );
+      const sizeOptions = sizeLabelsData.options;
+  
+      // Process each valid product concurrently
+      const processedProducts = await Promise.all(
+        validProducts.map(async (product) => {
+          // console.log(product.extension_attributes.configurable_product_options[0].values)
+          // Get related products matching the product's name
+          const { data: relatedData } = await axios.get(
+            `https://sparkyjeans.in/rest/V1/products?searchCriteria[pageSize]=100&searchCriteria[filterGroups][0][filters][0][field]=name&searchCriteria[filterGroups][0][filters][0][value]=${encodeURIComponent(
+              product.name
+            )}&searchCriteria[filterGroups][1][filters][0][field]=status&searchCriteria[filterGroups][1][filters][0][value]=1`,
+            config
+          );
+          const relatedItems = relatedData.items.filter((item) =>
+            product.extension_attributes.configurable_product_links.includes(item.id)
+          );
+
+          // Get stock info for each related item concurrently
+          const relatedItemsWithStock = await Promise.all(
+            relatedItems.map(async (item) => {
+              const { data: stockData } = await axios.get(
+                `https://sparkyjeans.in/rest/default/V1/stockStatuses/${item.sku}`,
+                config
+              );
+              return { ...item, delhiStock: stockData.qty };
+            })
+          );
+
+          // Process configurable options for the product
+          const configOptions =
+            product.extension_attributes.configurable_product_options[0];
+          configOptions.values = configOptions.values || [];
+  
+          relatedItemsWithStock.forEach((item) => {
+            // Find the 'size' attribute for this related item
+            const sizeAttr = item.custom_attributes.find(
+              (attr) => attr.attribute_code === "size"
+            );
+            if (sizeAttr) {
+              // Lookup the label from the cached size options
+              const sizeLabelOption = sizeOptions.find(
+                (option) => option.value == sizeAttr.value
+              );
+              if (sizeLabelOption) {
+                // Add value only if it is not already added
+                const exists = configOptions.values.some(
+                  (val) => Number(val.value_index) === Number(sizeAttr.value)
+                );
+                if (exists) {
+                  configOptions.values.push({
+                    label: sizeLabelOption.label,
+                    sku: item.sku,
+                    value_index: sizeAttr.value,
+                    stock: item.delhiStock,
+                    price: item.price,
+                  });
+                }
+              }
+            }
+          });
+  
+          // Filter out incomplete option values
+          configOptions.values = configOptions.values.filter(
+            (val) =>
+              val.label &&
+              val.sku &&
+              val.stock &&
+              val.price
+          );
+  
+          // Update image URLs for media and custom attributes. Check if the field disabled is false or not. Return false items only
+          const media_gallery_entries = (product.media_gallery_entries || []).map(
+            (entry) => {
+              if (!entry.disabled) {
+                return { ...entry, file: process.env.BASE_URL + entry.file };
+              }
+            }
+          );
+  
+          const custom_attributes = (product.custom_attributes || []).map((attr) => {
+            if (
+              ["image", "small_image", "thumbnail"].includes(attr.attribute_code)
+            ) {
+              return { ...attr, value: process.env.BASE_URL + attr.value };
+            }
+            return attr;
+          });
+  
+          // Return the final mapped product object
+          return {
+            id: product.id,
+            sku: product.sku,
+            name: product.name,
+            created_at: product.created_at,
+            updated_at: product.updated_at,
+            configurable_product_options: [
+              {
+                id: configOptions.id,
+                values: configOptions.values,
+              },
+            ],
+            media_gallery_entries,
+            custom_attributes,
+          };
+        })
+      );
+      return processedProducts
     } catch (err) {
       console.error("Error in getNewDrops function:", err);
       throw new Error(err);
@@ -340,8 +504,10 @@ class ProductService {
         }
       );
       const finalObj = [];
+      // return response.data
       const allCategoryArray = response.data.children_data[0].children_data;
       for (const category of allCategoryArray) {
+        console.log("Category", category)
         if (category.is_active && category.children_data.length > 0) {
           const tempCategoryArray = category.children_data;
           for (const temp of tempCategoryArray) {
@@ -388,23 +554,28 @@ class ProductService {
           },
         }
       );
+
+      // Filter out the orders which are already completed or cancelled before returning
+
       return response.data;
     } catch (err) {
       console.log("Error in getCustomerOrders function :: err", err);
       throw new Error(err);
     }
   }
-  async trackOrder(emailId) {
+  async trackOrder(orderId) {
     try {
       const token = await this.getAdminToken();
       const response = await axios.get(
-        "https://sparkyjeans.in/rest/V1/categories",
+        `https://sparkyjeans.in/rest/V1/shipments?searchCriteria[filterGroups][0][filters][0][field]=order_id&searchCriteria[filterGroups][0][filters][0][value]=${orderId}`,
         {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         }
       );
+      const tracking_number = response.data.items[0].tracks[0].track_number
+      // Call shiprocket API for status
       return response.data;
     } catch (err) {
       console.log("Error in getCategories function :: err", err);

@@ -33,12 +33,13 @@ const validationSchema = {
     return validationOfAPI(req, res, next, validationSchema, 'body');
   };
 
-router.post('/getNewDrops', validation, async (req, res) => {
+router.post('/placingOrder', validation, async (req, res) => {
   try {
-    const newDrops = await ProductService.getNewDrops(req.body.pageSize, req.body.page);
+    const products = await ProductService.placingOrder(req.body.email);
+
     res.sendJson({
       type: __constants.RESPONSE_MESSAGES.SUCCESS,
-      data: newDrops,
+      data: products,
     });
   } catch (err) {
     console.error('Error retrieving documents from knowledge base:', err);
