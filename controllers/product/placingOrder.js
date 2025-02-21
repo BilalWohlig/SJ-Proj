@@ -35,7 +35,7 @@ const validationSchema = {
 
 router.post('/placingOrder', validation, async (req, res) => {
   try {
-    const products = await ProductService.placingOrder(req.body.email);
+    const products = await ProductService.placingOrder(req.body.number);
 
     res.sendJson({
       type: __constants.RESPONSE_MESSAGES.SUCCESS,

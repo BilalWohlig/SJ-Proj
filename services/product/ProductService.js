@@ -23,16 +23,64 @@ class ProductService {
       throw new Error(err);
     }
   }
-  async placingOrder(email) {
+  async placingOrder(number) {
     try {
       const token = await this.getAdminToken();
-      const exisitngCustomer = await axios.get(`https://sparkyjeans.in/rest/V1/customers/search?searchCriteria[filterGroups][0][filters][0][field]=email&searchCriteria[filterGroups][0][filters][0][value]=${email}`,
+      console.log(token)
+      const existingCustomer = await axios.get(`https://sparkyjeans.in/rest/V1/customers/search?searchCriteria[filterGroups][0][filters][0][field]=mobile_number&searchCriteria[filterGroups][0][filters][0][value]=${number}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
         },
       })
-      if(exisitngCustomer.data.items && exisitngCustomer.data.items.length > 0) {
+      // return exisitngCustomer.data
+      if(existingCustomer.data.items && existingCustomer.data.items.length > 0) {
+        const createMagentoOrder = await axios.post(
+          `https://sparkyjeans.in/rest/default/V1/orders`,
+          {
+            entity: {
+              base_grand_total: 100,
+              customer_email: existingCustomer.data.items[0].email,
+              grand_total: 100,
+              items: [
+                {
+                  sku: "LWL62-GREEN-XL"
+                }
+              ],
+              payment: {
+                account_status: null,
+                additional_information: ["Pay Online with UPI | Cards | NetBanking (Additional 5% Off)"],
+                cc_last4: null,
+                method: "cashfree",
+              },
+              status_histories:[
+                {
+                  comment: "Order status updated by Shiprocket",
+                  is_customer_notified: null,
+                  is_visible_on_front: 0,
+                  parent_id: 527,
+                }
+              ],
+              billing_address: {
+                address_type: "billing",
+                city: "Katihar",
+                country_id: "IN",
+                firstname: existingCustomer.data.items[0].firstname,
+                lastname: existingCustomer.data.items[0].lastname,
+                postcode: 854105,
+                telephone: number
+              }
+            }
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+        
+        return createMagentoOrder.data
         //Send Razorpay link
 
         //Validate Payment
@@ -574,11 +622,21 @@ class ProductService {
           },
         }
       );
+      // return response.data
       const tracking_number = response.data.items[0].tracks[0].track_number
+      // const shipmentId = response.data.items[0].increment_id
       // Call shiprocket API for status
-      return response.data;
+      const shiprocketToken = await this.getShiprocketToken()
+      const status = await axios.get(`https://apiv2.shiprocket.in/v1/external/courier/track/shipment/${tracking_number}`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${shiprocketToken}`,
+        },
+      })
+      return status.data;
     } catch (err) {
-      console.log("Error in getCategories function :: err", err);
+      console.log("Error in trackOrder function :: err", err);
       throw new Error(err);
     }
   }
@@ -596,6 +654,13 @@ class ProductService {
       console.log("Error in getAdminToken function :: err", err);
       throw new Error(err);
     }
+  }
+  async getShiprocketToken() {
+    const token = await axios.post("https://apiv2.shiprocket.in/v1/external/auth/login", {
+      email: process.env.SHIPROCKET_EMAIL,
+      password: process.env.SHIPROCKET_PASSWORD
+    })
+    return token.data.token
   }
 }
 
