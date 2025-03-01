@@ -26,15 +26,10 @@ class ProductService {
   async placingOrder(number) {
     try {
       const token = await this.getAdminToken();
-      console.log(token)
-      const existingCustomer = await axios.get(`https://sparkyjeans.in/rest/V1/customers/search?searchCriteria[filterGroups][0][filters][0][field]=mobile_number&searchCriteria[filterGroups][0][filters][0][value]=${number}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
+      // console.log(token)
+      const existingCustomer = await this.checkExistingCustomer(number, token)
       // return exisitngCustomer.data
-      if(existingCustomer.data.items && existingCustomer.data.items.length > 0) {
+      if(existingCustomer) {
         const createMagentoOrder = await axios.post(
           `https://sparkyjeans.in/rest/default/V1/orders`,
           {
@@ -627,7 +622,7 @@ class ProductService {
       // const shipmentId = response.data.items[0].increment_id
       // Call shiprocket API for status
       const shiprocketToken = await this.getShiprocketToken()
-      const status = await axios.get(`https://apiv2.shiprocket.in/v1/external/courier/track/shipment/${tracking_number}`,
+      const status = await axios.get(`https://apiv2.shiprocket.in/v1/external/courier/track/awb/${tracking_number}`,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -639,6 +634,22 @@ class ProductService {
       console.log("Error in trackOrder function :: err", err);
       throw new Error(err);
     }
+  }
+  async cancelOrder(orderId) {
+    const cancel = await axios.post(`https://sparkyjeans.in/rest/default/V1/orders/${orderId}/cancel`)
+    return cancel.data
+  }
+  async checkExistingCustomer(number, token) {
+    const existingCustomer = await axios.get(`https://sparkyjeans.in/rest/V1/customers/search?searchCriteria[filterGroups][0][filters][0][field]=mobile_number&searchCriteria[filterGroups][0][filters][0][value]=${number}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+    if(existingCustomer.data.items && existingCustomer.data.items.length > 0) {
+      return true
+    }
+    return false
   }
   async getAdminToken() {
     try {
