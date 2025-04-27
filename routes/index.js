@@ -56,20 +56,30 @@ module.exports = async function (app) {
   })
   const apiPrefix = __config.addBaseUrlPrefix === true ? '/' + __config.api_prefix : ''
   const apiUrlPrefix = apiPrefix + '/api'
-  const appModulePath = `${__dirname}./../controllers/`
+  const appModulePath = `${__dirname}/../controllers/`
+
   fs.readdirSync(path.resolve(appModulePath)).forEach((folder) => {
-    if (fs.existsSync(path.resolve(appModulePath + folder))) {
-      fs.readdirSync(path.resolve(appModulePath + folder)).forEach((file) => {
-        if (file) {
-          if (require(path.resolve(appModulePath + folder + '/' + file)).stack) {
-            app.use(apiUrlPrefix + '/' + folder, require(path.resolve(appModulePath + folder + '/' + file)))
-            const routeToCheckValidator = require(path.resolve(appModulePath + folder + '/' + file)).stack[0]
-            if (routeToCheckValidator && routeToCheckValidator.route && routeToCheckValidator.route.stack && !routeToCheckValidator.route.stack.filter(ele => ele.name === __constants.VALIDATION).length) {
-              console.log('\x1b[31m Error :: \nCompiled time Failed\nValidation not present in API\n'); process.exit(0)
-            }
+  const folderPath = path.resolve(appModulePath, folder)
+
+  // 💥 Check if it's a directory
+  if (fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+    fs.readdirSync(folderPath).forEach((file) => {
+      const filePath = path.resolve(folderPath, file)
+
+      if (file) {
+        const requiredModule = require(filePath)
+
+        if (requiredModule.stack) {
+          app.use(apiUrlPrefix + '/' + folder, requiredModule)
+
+          const routeToCheckValidator = requiredModule.stack[0]
+          if (routeToCheckValidator && routeToCheckValidator.route && routeToCheckValidator.route.stack && !routeToCheckValidator.route.stack.filter(ele => ele.name === __constants.VALIDATION).length) {
+            console.log('\x1b[31m Error :: \nCompiled time Failed\nValidation not present in API\n')
+            process.exit(0)
           }
         }
-      })
-    }
-  })
+      }
+    })
+  }
+})
 }
