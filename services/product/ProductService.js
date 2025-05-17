@@ -1,5 +1,18 @@
 const axios = require("axios");
 const moment = require("moment");
+const fs = require("fs/promises");
+// const fs = require("fs");
+const OpenAI = require("openai");
+const path = require('path');
+const __constants = require('../../config/constants');
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const OUTPUT_DIR = path.resolve('finalImages');
+const { v4: uuidv4 } = require("uuid");
+const TNB_BASE       = 'https://thenewblack.ai/api/1.1/wf';
+const TNB_EMAIL      = process.env.TNB_EMAIL;      // keep in .env / secrets
+const TNB_PASSWORD   = process.env.TNB_PASSWORD;
+
+
 class ProductService {
   async getProduct(pageSize, categoryID) {
     try {
@@ -852,6 +865,167 @@ class ProductService {
 
     // after loop, `nearestStore` is the store object + the two text fields
     return nearestStore;
+  }
+
+  async generateImage({ personPath, garmentPath, prompt = '' }) {
+    try {
+      const [personBuffer, garmentBuffer] = await Promise.all([
+        fs.readFile(personPath),
+        fs.readFile(garmentPath),
+      ]);
+      const imagesArray = [
+        await OpenAI.toFile(personBuffer, path.basename(personPath), { type: 'image/jpeg' }),
+        await OpenAI.toFile(garmentBuffer, path.basename(garmentPath), { type: 'image/webp' }),
+      ];
+      const finalPrompt = `${prompt}`.trim();
+      const resp = await openai.images.edit({
+        model: 'gpt-image-1',
+        prompt: finalPrompt,
+        n: 1,
+        quality: "high",
+        size: '1024x1536',
+        image: imagesArray,
+        moderation: "low"
+      });
+  
+      // Optionally delete temp uploads (non‑blocking)
+      fs.unlink(personPath).catch(() => {});
+      fs.unlink(garmentPath).catch(() => {});
+
+      const localPath = await this.saveB64(resp.data[0].b64_json, 'img');
+      return { filePath: localPath };
+  
+    } catch (error) {
+      console.error('tryOnImage failed', error);
+      fs.unlink(personPath).catch(() => {});
+      fs.unlink(garmentPath).catch(() => {});
+      throw { type: __constants.RESPONSE_MESSAGES.SERVER_ERROR, error };
+    }
+  }
+
+  async maskImage({ imagePath, maskPath, prompt = ''}) {
+    try {
+      const [imgBuffer, maskBuffer] = await Promise.all([
+        fs.readFile(imagePath),
+        fs.readFile(maskPath),
+      ]);
+  
+      const imageFile = await OpenAI.toFile(imgBuffer, path.basename(imagePath), { type: 'image/png' });
+      const maskFile = await OpenAI.toFile(maskBuffer, path.basename(maskPath), { type: 'image/png' });
+  
+      // const imageFile = await OpenAI.toFile(fs.createReadStream(imagePath), null, { type: 'image/png' });
+      // const maskFile = await OpenAI.toFile(fs.createReadStream(maskPath), null, { type: 'image/png' });
+  
+      const finalPrompt = `${prompt}`.trim();
+  
+      const resp = await openai.images.edit({
+        model: 'gpt-image-1',
+        image: imageFile,
+        mask: maskFile,
+        prompt: finalPrompt,
+        n: 1,
+        quality: "high",
+        size: '1024x1536',
+        moderation: "low"
+        // response_format: 'b64_json',
+      });
+  
+      fs.unlink(imagePath).catch(() => {});
+      fs.unlink(maskPath).catch(() => {});
+
+      const localPath = await this.saveB64(resp.data[0].b64_json, 'mask');
+      return { filePath: localPath };
+    } catch (error) {
+      console.error('maskImage failed', error);
+      fs.unlink(imagePath).catch(() => {});
+      fs.unlink(maskPath).catch(() => {});
+      throw { type: __constants.RESPONSE_MESSAGES.SERVER_ERROR, error };
+    }
+  }
+  async ensureDir() {
+    await fs.mkdir(OUTPUT_DIR, { recursive: true });
+  }
+  async saveB64(b64, prefix = 'img') {
+    await this.ensureDir();
+    const filename = `${prefix}-${Date.now()}-${uuidv4()}.jpeg`;
+    const fullPath = path.join(OUTPUT_DIR, filename);
+    await fs.writeFile(fullPath, Buffer.from(b64, 'base64'));
+    return fullPath;
+  }
+
+  async generateTNBImage (opts) {
+    const {
+      clothingPhotoUrl,           // you supply this (see route)
+      clothing_type,
+      gender,
+      country,
+      age,
+      other_clothes = '',
+      image_context,
+      ratio,
+      other_model_info
+    } = opts;
+  
+    /* ---------- 1. start generation ---------- */
+    const fd = new FormData();
+    fd.append('email',     TNB_EMAIL);
+    fd.append('password',  TNB_PASSWORD);
+    fd.append('clothing_photo', clothingPhotoUrl);
+    fd.append('clothing_type',  clothing_type);
+    fd.append('gender',         gender);
+    fd.append('country',        country);
+    fd.append('age',            age);
+    fd.append('other_clothes',  other_clothes);
+    fd.append('image_context',  image_context);
+    fd.append('ratio',          ratio);
+    fd.append('other_model_info', other_model_info);
+
+    // return fd
+  
+    const { data: jobId } = await axios.post(`${TNB_BASE}/generated-models`, fd, {
+      // headers: fd.getHeaders(),
+      timeout: 15_000
+    });
+    // console.log("JOB ID", jobId)
+    const pollFdBase = () => {
+      const _fd = new FormData();
+      _fd.append('email',    TNB_EMAIL);
+      _fd.append('password', TNB_PASSWORD);
+      _fd.append('id',       jobId);
+      return _fd;
+    };
+  
+    let resultUrl = null;
+    const deadline = Date.now() + 60_000;        // 60-second safety cap
+    console.log("Fetching Results")
+    while (Date.now() < deadline) {
+      try {
+        const { data } = await axios.post(`${TNB_BASE}/results`, pollFdBase(), {
+          // headers: pollFdBase().getHeaders(),
+          timeout: 10_000
+        });
+        if (typeof data === 'string' && data.startsWith('http')) {
+          resultUrl = data;
+          break;
+        }
+      } catch (_) { /* ignore until timeout */ }
+      await new Promise(r => setTimeout(r, 3_000)); // back-off 3 s
+    }
+    if (!resultUrl) throw new Error('Timed-out waiting for NewBlack result');
+  
+    console.log("Downloading Now")
+    /* ---------- 3. download & persist ---------- */
+    const { data: imgBuf } = await axios.get(resultUrl, {
+      responseType: 'arraybuffer',
+      timeout: 30_000
+    });
+    console.log("Fetching Now")
+    const ext  = path.extname(resultUrl.split('?')[0]) || '.jpg';
+    const file = `${uuidv4()}${ext}`;
+    const filePath = path.join('uploads', file);
+    await fs.writeFile(filePath, imgBuf);
+  
+    return { id: jobId, filePath };
   }
 }
 
