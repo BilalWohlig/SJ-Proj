@@ -853,6 +853,20 @@ class ProductService {
     // after loop, `nearestStore` is the store object + the two text fields
     return nearestStore;
   }
+
+  async storeAddresses() {
+    const stores = [{ address: "Gr Flr, Sion Garage Building, PN 112, Road, near Cinemax, Koliwada, Sion, Mumbai, Maharashtra 400022" }]
+    return this.attachMapsLinks(stores)
+  }
+
+  async attachMapsLinks(stores) {
+    return stores.map(store => ({
+      ...store,
+      mapsUrl:
+        "https://www.google.com/maps/search/?api=1&query=" +
+        encodeURIComponent(store.address)
+    }));
+  }
 }
 
 module.exports = new ProductService();
