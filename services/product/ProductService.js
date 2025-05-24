@@ -1,5 +1,29 @@
 const axios = require("axios");
 const moment = require("moment");
+const { TranscoderServiceClient } =
+  require("@google-cloud/video-transcoder").v1;
+const transcoder = new TranscoderServiceClient({
+  keyFilename: "./transcoder-key.json", // ← path to the JSON key
+  // OR embed the JSON directly:
+  // credentials: require('./svc-key.json'),
+});
+const projectId = "proj-newsshield-prod-infra";
+const location = "us-central1";
+const { execSync, spawnSync } = require("node:child_process");
+const { accessSync, unlinkSync, writeFileSync } = require("node:fs");
+const { access } = require("node:fs/promises");
+// const path = require("node:path");
+const sh = (cmd) => execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] })
+                    .toString().trim();
+// const fs = require("node:fs");
+// const { spawnSync } = require("node:child_process");
+// const { SpeechClient } = require("@google-cloud/speech");
+// const similarity = require("string-similarity");
+// const { writeFileSync, unlinkSync } = require("fs-extra");
+
+
+
+// const outputUri = "gs://transcoder-output-v1/";
 class ProductService {
   async getProduct(pageSize, categoryID) {
     try {
@@ -833,7 +857,12 @@ class ProductService {
           `${store.lat},${store.lng}`
         );
 
-      console.log({ distance_value, distance_text, duration_value, duration_text });
+      console.log({
+        distance_value,
+        distance_text,
+        duration_value,
+        duration_text,
+      });
 
       // if strictly closer, or same distance but faster
       if (
@@ -855,17 +884,122 @@ class ProductService {
   }
 
   async storeAddresses() {
-    const stores = [{ address: "Gr Flr, Sion Garage Building, PN 112, Road, near Cinemax, Koliwada, Sion, Mumbai, Maharashtra 400022" }]
-    return this.attachMapsLinks(stores)
+    const stores = [
+      {
+        address:
+          "Gr Flr, Sion Garage Building, PN 112, Road, near Cinemax, Koliwada, Sion, Mumbai, Maharashtra 400022",
+      },
+    ];
+    return this.attachMapsLinks(stores);
   }
 
   async attachMapsLinks(stores) {
-    return stores.map(store => ({
+    return stores.map((store) => ({
       ...store,
       mapsUrl:
         "https://www.google.com/maps/search/?api=1&query=" +
-        encodeURIComponent(store.address)
+        encodeURIComponent(store.address),
     }));
+  }
+  async trimAndMux({ video, audio, out }) {
+    // 1. make sure inputs exist
+    await access(video); await access(audio);
+  
+    // 2. get duration of MP3 (in seconds, may be fractional)
+    const dur = sh(`ffprobe -v error -show_entries format=duration \
+                     -of default=noprint_wrappers=1:nokey=1 "${audio}"`);
+    console.log(`→ duration of ${audio}: ${dur}s`);
+  
+    // 3. run ffmpeg: trim video + map ext. audio, stop at shortest
+    // const ffArgs = [
+    //   "-ss",
+    //   "0",
+    //   "-t",
+    //   (Number(dur) + 0.3).toString(),
+    //   "-i",
+    //   video,
+    //   "-map",
+    //   "0:v:0",
+    //   "-an", // remove any audio the clip carried
+    //   "-c:v",
+    //   "copy", // skip re-encode when codecs/size/fps already match
+    //   out,
+    // ];
+    const ffArgs = [
+      "-ss", "0", "-t", dur, "-i", video,
+      "-i", audio,
+      "-map", "0:v", "-map", "1:a",
+      "-c:v", "copy",
+      "-vf", "fps=30,format=yuv420p",      // force common 30 fps
+      "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+      "-c:a", "aac", "-ac", "2",
+      "-reset_timestamps", "1",
+      "-shortest", out
+    ];
+  
+    const { status } = spawnSync("ffmpeg", ffArgs, { stdio: "inherit" });
+    if (status !== 0) throw new Error(`ffmpeg failed on ${video}`);
+  }
+
+  async createVideo() {
+    const sources = [
+      { video: "clip1.mp4", audio: "audio1.mp3" },
+      { video: "clip2.mp4", audio: "audio2.mp3" },
+      { video: "clip3.mp4", audio: "audio3.mp3" },
+      { video: "clip4.mp4", audio: "audio4.mp3" },
+      { video: "clip5.mp4", audio: "audio5.mp3" },
+      { video: "clip6.mp4", audio: "audio6.mp3" },
+      { video: "clip7.mp4", audio: "audio7.mp3" },
+      { video: "clip8.mp4", audio: "audio8.mp3" },
+      { video: "clip9.mp4", audio: "audio9.mp3" },
+      { video: "clip10.mp4", audio: "audio10.mp3" },
+      { video: "clip11.mp4", audio: "audio11.mp3" },
+    ]
+    const trimmedFiles = [];
+    // --- parallel version ---
+    const trimJobs = sources.map(({ video, audio }, idx) => {
+      const out = `clip${idx + 1}_done.mp4`;
+      trimmedFiles.push(out);
+      return this.trimAndMux({ video, audio, out });
+    });
+    await Promise.all(trimJobs); 
+    console.log("Fixxx", trimmedFiles);
+
+    // await this.trimAndMux({
+    //   video: "clip1.mp4",
+    //   audio: "audio1.mp3",
+    //   out:   "clip1_done.mp4"
+    // });
+  
+    // await this.trimAndMux({
+    //   video: "clip2.mp4",
+    //   audio: "audio2.mp3",
+    //   out:   "clip2_done.mp4"
+    // });
+
+    /** 3️⃣  make the concat list file */
+    const listText = trimmedFiles.map((f) => `file '${f}'`).join("\n");
+    // console.log(listText);
+    writeFileSync("list.txt", listText);
+
+    /** 4️⃣  concat all videos + overlay background music */
+    // const concatArgs = [
+    //   "-f", "concat", "-safe", "0", "-i", "list.txt",
+    //   "-i", "music.mp3",
+    //   "-map", "0:v:0", "-map", "1:a:0",
+    //   "-c:v", "copy",
+    //   "-c:a", "aac", "-ac", "2",
+    //   "-shortest", "final.mp4",
+    // ];
+    // const { status } = spawnSync("ffmpeg", concatArgs, { stdio: "inherit" });
+    // if (status !== 0) throw new Error("ffmpeg failed while concatenating clips");
+    // sh(`printf "file 'clip1_done.mp4'\\nfile 'clip2_done.mp4'\\n" > list.txt`);
+    sh(`ffmpeg -f concat -safe 0 -i list.txt -c copy final.mp4`);
+    /** 5️⃣  tidy up */
+    [...trimmedFiles, "list.txt"].forEach((f) => {
+      try { unlinkSync(f); } catch { /* ignore if already gone */ }
+    });
+    return "✅  final.mp4 ready";
   }
 }
 
