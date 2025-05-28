@@ -10,11 +10,13 @@ const transcoder = new TranscoderServiceClient({
 const projectId = "proj-newsshield-prod-infra";
 const location = "us-central1";
 const { execSync, spawnSync } = require("node:child_process");
-const { accessSync, unlinkSync, writeFileSync } = require("node:fs");
+const { accessSync, unlinkSync, writeFileSync, readFileSync, constants: fsConstants } = require("node:fs");
 const { access } = require("node:fs/promises");
 // const path = require("node:path");
 const sh = (cmd) => execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] })
                     .toString().trim();
+const path = require('path'); // <<< Make sure this is at the top of your JS file
+const fs = require('fs');  
 // const fs = require("node:fs");
 // const { spawnSync } = require("node:child_process");
 // const { SpeechClient } = require("@google-cloud/speech");
@@ -901,86 +903,224 @@ class ProductService {
         encodeURIComponent(store.address),
     }));
   }
-  async trimAndMux({ video, audio, out }) {
+  async trimAndMux({ video, audio, subtitleText, out, idx, totalClips, fadeTime = 0.5 }) {
     // 1. make sure inputs exist
     await access(video); await access(audio);
   
     // 2. get duration of MP3 (in seconds, may be fractional)
-    const dur = sh(`ffprobe -v error -show_entries format=duration \
+    const durOutput = sh(`ffprobe -v error -show_entries format=duration \
                      -of default=noprint_wrappers=1:nokey=1 "${audio}"`);
+    const dur = parseFloat(durOutput);
+    if (isNaN(dur)) {
+        console.error(`[Debug ${idx+1}] Failed to get duration for ${audio}. ffprobe output: "${durOutput}"`);
+        throw new Error(`Failed to parse duration for ${audio}`);
+    }
     console.log(`→ duration of ${audio}: ${dur}s`);
-  
-    // 3. run ffmpeg: trim video + map ext. audio, stop at shortest
-    // const ffArgs = [
-    //   "-ss",
-    //   "0",
-    //   "-t",
-    //   (Number(dur) + 0.3).toString(),
-    //   "-i",
-    //   video,
-    //   "-map",
-    //   "0:v:0",
-    //   "-an", // remove any audio the clip carried
-    //   "-c:v",
-    //   "copy", // skip re-encode when codecs/size/fps already match
-    //   out,
-    // ];
+    // console.log(`${Number(dur) + 0.3}` + "s")
+
+    const srtPath = `subtitle${idx + 1}.srt`;
+    // const srtPath = path.resolve(baseSrtPath)
+    const formatTime = (totalSeconds) => {
+      if (isNaN(totalSeconds) || totalSeconds < 0) {
+        console.warn(`[Debug ${idx+1}] Invalid totalSeconds for formatTime: ${totalSeconds}. Defaulting to 0.`);
+        totalSeconds = 0;
+      }
+      const date = new Date(Math.round(totalSeconds * 1000));
+      const timeStr = date.toISOString().slice(11, 23); 
+      return timeStr.replace('.', ',');
+    };
+    const srtContent = `1\n00:00:00,000 --> ${formatTime(Number(dur) + 0.35)}\n${subtitleText}\n\n`;
+    writeFileSync(srtPath, srtContent, "utf8");
+
+    console.log(`[Debug ${idx+1}] CWD: ${process.cwd()}`);
+    console.log(`[Debug ${idx+1}] Wrote SRT to: ${srtPath}`);
+    let srtFileExistsAfterWrite = false;
+    try {
+      accessSync(srtPath, fsConstants.F_OK);
+      srtFileExistsAfterWrite = true;
+    } catch (e) {
+      // File does not exist or is not accessible
+      srtFileExistsAfterWrite = false;
+    }
+    console.log(`[Debug ${idx+1}] SRT Exists? ${srtFileExistsAfterWrite}`);
+    if (!srtFileExistsAfterWrite) {
+      throw new Error(`CRITICAL: SRT file ${srtPath} was NOT found immediately after writing!`);
+    }
+
+    let srtPathForFilter = srtPath.replace(/\\/g, '/');
+    srtPathForFilter = srtPathForFilter.replace(/:/g, '\\:');
+    srtPathForFilter = srtPathForFilter.replace(/'/g, "'\\''");
+
+    let fadeEffects = "";
+    let audioFadeEffects = "";
+    const isFirstClip = idx === 0;
+    const isLastClip = idx === totalClips - 1;
+    
+    if (isFirstClip && isLastClip) {
+        // Single clip - fade in and out
+        fadeEffects = `,fade=t=in:st=0:d=${fadeTime},fade=t=out:st=${dur - fadeTime}:d=${fadeTime}`;
+        audioFadeEffects = `afade=t=in:st=0:d=${fadeTime},afade=t=out:st=${dur - fadeTime}:d=${fadeTime}`;
+    } else if (isFirstClip) {
+        // First clip - only fade in
+        fadeEffects = `,fade=t=in:st=0:d=${fadeTime}`;
+        audioFadeEffects = `afade=t=in:st=0:d=${fadeTime}`;
+    } else if (isLastClip) {
+        // Last clip - only fade out
+        fadeEffects = `,fade=t=out:st=${dur - fadeTime}:d=${fadeTime}`;
+        audioFadeEffects = `afade=t=out:st=${dur - fadeTime}:d=${fadeTime}`;
+    }
+    
     const ffArgs = [
-      "-ss", "0", "-t", dur, "-i", video,
+      "-ss", "0", "-t", (Number(dur) + 0.3).toString(), "-i", video,
       "-i", audio,
       "-map", "0:v", "-map", "1:a",
-      "-c:v", "copy",
-      "-vf", "fps=30,format=yuv420p",      // force common 30 fps
       "-c:v", "libx264", "-crf", "20", "-preset", "fast",
       "-c:a", "aac", "-ac", "2",
-      "-reset_timestamps", "1",
+      "-vf", `fps=30,format=yuv420p,subtitles='${srtPathForFilter}':force_style='FontName=Arial,FontSize=16,PrimaryColour=&Hffffff,OutlineColour=&H000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=30'${fadeEffects}`,
+      ...(audioFadeEffects ? ["-af", audioFadeEffects] : []),
       "-shortest", out
     ];
-  
-    const { status } = spawnSync("ffmpeg", ffArgs, { stdio: "inherit" });
-    if (status !== 0) throw new Error(`ffmpeg failed on ${video}`);
-  }
 
+    console.log(`[Debug ${idx+1}] Running ffmpeg with args: ffmpeg ${ffArgs.join(' ')}`);
+
+    const { status, error } = spawnSync("ffmpeg", ffArgs, { stdio: "inherit" });
+    if (status !== 0) {
+      console.error(`[Debug ${idx+1}] ffmpeg failed for ${video}. Status: ${status}`, error);
+      throw new Error(`ffmpeg failed on ${video}. Status: ${status}`);
+    }
+    let srtFileExistsBeforeUnlink = false;
+    try {
+      accessSync(srtPath, fsConstants.F_OK);
+      srtFileExistsBeforeUnlink = true;
+    } catch (e) {
+      srtFileExistsBeforeUnlink = false;
+    }
+    if (srtFileExistsBeforeUnlink) {
+        unlinkSync(srtPath); 
+    }
+  }
+  async generateSourcesArray() {
+    try {
+      const videoFolder = 'Videos/Scenes/Vadilal';
+      const audioFolder = 'Videos/Audio/Vadilal';
+      
+      // Read both directories
+      const [videoFiles, audioFiles] = await Promise.all([
+        fs.promises.readdir(videoFolder),
+        fs.promises.readdir(audioFolder)
+      ]);
+      
+      // Filter for video files (mp4, mov, avi, etc.)
+      const videoClips = videoFiles
+        .filter(file => /\.(mp4|mov|avi|mkv|webm)$/i.test(file))
+        .sort((a, b) => {
+          // Extract numbers from filenames for proper sorting
+          const numA = parseInt(a.match(/\d+/) || 0);
+          const numB = parseInt(b.match(/\d+/) || 0);
+          return numA - numB;
+        });
+      
+      // Filter for audio files (mp3, wav, aac, etc.)
+      const audioClips = audioFiles
+        .filter(file => /\.(mp3|wav|aac|ogg|flac)$/i.test(file))
+        .sort((a, b) => {
+          // Extract numbers from filenames for proper sorting
+          const numA = parseInt(a.match(/\d+/) || 0);
+          const numB = parseInt(b.match(/\d+/) || 0);
+          return numA - numB;
+        });
+      
+      // Generate sources array
+      const maxLength = Math.max(videoClips.length, audioClips.length);
+      const sources = [];
+      
+      for (let i = 0; i < maxLength; i++) {
+        const source = {};
+        
+        if (videoClips[i]) {
+          source.video = path.join(videoFolder, videoClips[i]);
+        }
+        
+        if (audioClips[i]) {
+          source.audio = path.join(audioFolder, audioClips[i]);
+        }
+        
+        sources.push(source);
+      }
+      
+      console.log(`Found ${videoClips.length} video files and ${audioClips.length} audio files`);
+      console.log('Generated sources array:');
+      // console.log(JSON.stringify(sources, null, 2));
+      
+      return sources;
+      
+    } catch (error) {
+      console.error('Error reading directories:', error.message);
+      return [];
+    }
+  }
   async createVideo() {
-    const sources = [
-      { video: "clip1.mp4", audio: "audio1.mp3" },
-      { video: "clip2.mp4", audio: "audio2.mp3" },
-      { video: "clip3.mp4", audio: "audio3.mp3" },
-      { video: "clip4.mp4", audio: "audio4.mp3" },
-      { video: "clip5.mp4", audio: "audio5.mp3" },
-      { video: "clip6.mp4", audio: "audio6.mp3" },
-      { video: "clip7.mp4", audio: "audio7.mp3" },
-      { video: "clip8.mp4", audio: "audio8.mp3" },
-      { video: "clip9.mp4", audio: "audio9.mp3" },
-      { video: "clip10.mp4", audio: "audio10.mp3" },
-      { video: "clip11.mp4", audio: "audio11.mp3" },
-    ]
+    const narrationLines = readFileSync("narrations.txt", "utf8").split("\n").filter(Boolean);
+    console.log(narrationLines)
+    const sources = await this.generateSourcesArray()
+    console.log(sources)
     const trimmedFiles = [];
     // --- parallel version ---
     const trimJobs = sources.map(({ video, audio }, idx) => {
       const out = `clip${idx + 1}_done.mp4`;
+      const subtitleText = narrationLines[idx] || "";
       trimmedFiles.push(out);
-      return this.trimAndMux({ video, audio, out });
+      return this.trimAndMux({ video, audio, subtitleText, out, idx, totalClips: sources.length, fadeTime: 0.5  });
     });
-    await Promise.all(trimJobs); 
-    console.log("Fixxx", trimmedFiles);
 
-    // await this.trimAndMux({
-    //   video: "clip1.mp4",
-    //   audio: "audio1.mp3",
-    //   out:   "clip1_done.mp4"
-    // });
-  
-    // await this.trimAndMux({
-    //   video: "clip2.mp4",
-    //   audio: "audio2.mp3",
-    //   out:   "clip2_done.mp4"
-    // });
+    try {
+      await Promise.all(trimJobs);
+      console.log("All trimAndMux jobs completed. Trimmed files:", trimmedFiles);
+    } catch (error) {
+      console.error("Error during trimAndMux process:", error);
+      trimmedFiles.forEach((f) => {
+        try {
+          accessSync(f, fsConstants.F_OK); // Check if file exists before unlinking
+          unlinkSync(f); 
+        } catch (e) { 
+          console.warn(`Could not delete temp file ${f} on error: ${e.message}`);
+        }
+      });
+      throw error; 
+    }
 
-    /** 3️⃣  make the concat list file */
-    const listText = trimmedFiles.map((f) => `file '${f}'`).join("\n");
-    // console.log(listText);
+    const listText = trimmedFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n");
     writeFileSync("list.txt", listText);
+    console.log("Generated list.txt for concatenation:", listText);
+
+    // console.log("Running concatenation command: ffmpeg -y -f concat -safe 0 -i list.txt -c copy final.mp4");
+    
+    try {
+      const concatResult = spawnSync("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "final.mp4"], { stdio: "inherit" });
+      if (concatResult.status !== 0) {
+        console.error("ffmpeg concatenation failed.", concatResult.error);
+        throw new Error("ffmpeg failed while concatenating clips. Status: " + concatResult.status);
+      }
+    } catch (error) {
+        console.error("Error during concatenation:", error);
+        try {
+            accessSync("list.txt", fsConstants.F_OK);
+            unlinkSync("list.txt");
+        } catch (e) { /* ignore */ }
+        throw error;
+    }
+
+    console.log("Cleaning up temporary files...");
+    [...trimmedFiles, "list.txt"].forEach((f) => {
+      try {
+        accessSync(f, fsConstants.F_OK); // Check if file exists
+        unlinkSync(f); 
+        console.log(`Deleted: ${f}`);
+      } catch (e) { 
+        // console.warn(`Could not delete temporary file ${f}: ${e.message}`);
+      }
+    });
+    return "✅ final.mp4 ready";
 
     /** 4️⃣  concat all videos + overlay background music */
     // const concatArgs = [
