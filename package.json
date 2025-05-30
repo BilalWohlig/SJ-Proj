@@ -60,6 +60,7 @@
     "passport": "^0.6.0",
     "passport-jwt": "^4.0.1",
     "redis": "^3.0.2",
-    "string-similarity": "^4.0.4"
+    "string-similarity": "^4.0.4",
+    "uuid": "^11.1.0"
   }
 }

@@ -1,22 +1,15 @@
 const axios = require("axios");
 const moment = require("moment");
-const { TranscoderServiceClient } =
-  require("@google-cloud/video-transcoder").v1;
-const transcoder = new TranscoderServiceClient({
-  keyFilename: "./transcoder-key.json", // ← path to the JSON key
-  // OR embed the JSON directly:
-  // credentials: require('./svc-key.json'),
-});
-const projectId = "proj-newsshield-prod-infra";
-const location = "us-central1";
+
 const { execSync, spawnSync } = require("node:child_process");
 const { accessSync, unlinkSync, writeFileSync, readFileSync, constants: fsConstants } = require("node:fs");
 const { access } = require("node:fs/promises");
-// const path = require("node:path");
 const sh = (cmd) => execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] })
                     .toString().trim();
 const path = require('path'); // <<< Make sure this is at the top of your JS file
 const fs = require('fs');  
+const __constants = require('../../config/constants');
+const { v4: uuidv4 } = require('uuid');
 // const fs = require("node:fs");
 // const { spawnSync } = require("node:child_process");
 // const { SpeechClient } = require("@google-cloud/speech");
@@ -27,6 +20,36 @@ const fs = require('fs');
 
 // const outputUri = "gs://transcoder-output-v1/";
 class ProductService {
+  constructor() {
+      this.apiKey = process.env.ELEVENLABS_API_KEY;
+      this.baseURL = 'https://api.elevenlabs.io/v1';
+      
+      if (!this.apiKey) {
+          throw new Error('ELEVENLABS_API_KEY environment variable is required');
+      }
+      
+      this.downloadFolder = path.join(process.cwd());
+      // Default settings
+      this.defaultVoiceId = 'pNInz6obpgDQGcFmaJgB'; // Adam voice
+      this.defaultModel = 'eleven_multilingual_v2';
+      this.defaultVoiceSettings = {
+          stability: 0.5,
+          similarity_boost: 0.8,
+          style: 0.0,
+          use_speaker_boost: true
+      };
+      
+      // Setup axios instance
+      this.axiosInstance = axios.create({
+          baseURL: this.baseURL,
+          headers: {
+              'Accept': 'audio/mpeg',
+              'Content-Type': 'application/json',
+              'xi-api-key': this.apiKey
+          },
+          timeout: 30000 // 30 seconds timeout
+      });
+  }
   async getProduct(pageSize, categoryID) {
     try {
       // First, get size data, then check stock for each size and return data. Same for new drops
@@ -903,6 +926,9 @@ class ProductService {
         encodeURIComponent(store.address),
     }));
   }
+
+
+
   async trimAndMux({ video, audio, subtitleText, out, idx, totalClips, fadeTime = 0.5 }) {
     // 1. make sure inputs exist
     await access(video); await access(audio);
@@ -1120,6 +1146,7 @@ class ProductService {
         // console.warn(`Could not delete temporary file ${f}: ${e.message}`);
       }
     });
+    
     return "✅ final.mp4 ready";
 
     /** 4️⃣  concat all videos + overlay background music */
@@ -1140,6 +1167,177 @@ class ProductService {
       try { unlinkSync(f); } catch { /* ignore if already gone */ }
     });
     return "✅  final.mp4 ready";
+  }
+  async getAvailableVoices() {
+      try {
+          console.log('Fetching available voices from ElevenLabs...');
+          
+          const response = await this.axiosInstance.get('/voices', {
+              headers: {
+                  'Accept': 'application/json'
+              }
+          });
+
+          if (response.status !== 200) {
+              throw {
+                  type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                  err: `Failed to fetch voices. Status: ${response.status}`
+              };
+          }
+
+          const voices = response.data.voices || [];
+          console.log(`Retrieved ${voices.length} voices`);
+          
+          // Return simplified voice information
+          return voices.map(voice => ({
+              voice_id: voice.voice_id,
+              name: voice.name,
+              category: voice.category,
+              description: voice.description,
+              preview_url: voice.preview_url,
+              available_for_tiers: voice.available_for_tiers,
+              settings: voice.settings
+          }));
+
+      } catch (error) {
+          console.error('Error in getAvailableVoices:', error);
+          
+          if (error.response) {
+              const status = error.response.status;
+              if (status === 401) {
+                  throw {
+                      type: __constants.RESPONSE_MESSAGES.UNAUTHORIZED,
+                      err: 'Invalid ElevenLabs API key'
+                  };
+              } else {
+                  throw {
+                      type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                      err: `Failed to fetch voices from ElevenLabs API (${status})`
+                  };
+              }
+          } else if (error.type) {
+              throw error;
+          } else {
+              throw {
+                  type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                  err: error.message || 'Unknown error occurred while fetching voices'
+              };
+          }
+      }
+  }
+  async convertTextToVoice({ text, voiceId }) {
+      try {
+          if (!text || text.trim().length === 0) {
+              throw {
+                  type: __constants.RESPONSE_MESSAGES.VALIDATION_ERROR,
+                  err: 'Text is required and cannot be empty'
+              };
+          }
+
+          const selectedVoiceId = voiceId
+          const selectedModel = this.defaultModel;
+          const selectedVoiceSettings = { ...this.defaultVoiceSettings };
+
+          console.log(`Converting text to speech: ${text.substring(0, 50)}...`);
+          console.log(`Using voice ID: ${selectedVoiceId}, Model: ${selectedModel}`);
+
+          const requestBody = {
+              text: text,
+              model_id: selectedModel,
+              voice_settings: selectedVoiceSettings
+          };
+
+          const response = await this.axiosInstance.post(
+              `/text-to-speech/${selectedVoiceId}`,
+              requestBody,
+              {
+                  responseType: 'arraybuffer'
+              }
+          );
+
+          if (response.status !== 200) {
+              throw {
+                  type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                  err: `ElevenLabs API returned status: ${response.status}`
+              };
+          }
+
+          console.log('Text-to-speech conversion successful');
+          const audioFilename = this.generateFilename();
+          const filePath = path.join(this.downloadFolder, audioFilename);
+          
+          // Save audio buffer to file
+          const audioBuffer = Buffer.from(response.data);
+          await fs.promises.writeFile(filePath, audioBuffer);
+          
+          console.log(`Audio file saved successfully: ${filePath}`);
+          return {
+            success: true,
+            message: 'Audio file generated and saved successfully',
+            filename: audioFilename,
+            path: filePath
+        };
+
+      } catch (error) {
+          console.error('Error in convertTextToVoice:', error);
+          
+          if (error.response) {
+              // ElevenLabs API error
+              const status = error.response.status;
+              const errorData = error.response.data;
+              
+              let errorMessage = 'ElevenLabs API error';
+              if (errorData && errorData.detail) {
+                  errorMessage = errorData.detail.message || errorData.detail;
+              } else if (errorData) {
+                  errorMessage = errorData.toString();
+              }
+
+              if (status === 401) {
+                  throw {
+                      type: __constants.RESPONSE_MESSAGES.UNAUTHORIZED,
+                      err: 'Invalid ElevenLabs API key'
+                  };
+              } else if (status === 422) {
+                  throw {
+                      type: __constants.RESPONSE_MESSAGES.VALIDATION_ERROR,
+                      err: `Validation error: ${errorMessage}`
+                  };
+              } else if (status === 429) {
+                  throw {
+                      type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                      err: 'Rate limit exceeded. Please try again later.'
+                  };
+              } else {
+                  throw {
+                      type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                      err: `ElevenLabs API error (${status}): ${errorMessage}`
+                  };
+              }
+          } else if (error.request) {
+              // Network error
+              throw {
+                  type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                  err: 'Failed to connect to ElevenLabs API. Please check your internet connection.'
+              };
+          } else if (error.type) {
+              // Custom error from our validation
+              throw error;
+          } else {
+              // Other errors
+              throw {
+                  type: __constants.RESPONSE_MESSAGES.SERVER_ERROR,
+                  err: error.message || 'Unknown error occurred during text-to-speech conversion'
+              };
+          }
+      }
+  }
+  generateFilename(extension = 'mp3') {
+      // Create a safe filename from text (first 30 chars)
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+      const uniqueId = uuidv4().substring(0, 8);
+      
+      return `converted_audio_${timestamp}_${uniqueId}.${extension}`;
   }
 }
 
