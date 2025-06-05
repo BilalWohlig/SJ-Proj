@@ -53,9 +53,11 @@
     "moment": "^2.29.4",
     "mongoose": "^6.8.1",
     "mongoose-timestamp-plugin": "^0.0.1",
+    "multer": "^2.0.0",
     "node-vault": "^0.9.22",
     "passport": "^0.6.0",
     "passport-jwt": "^4.0.1",
-    "redis": "^3.0.2"
+    "redis": "^3.0.2",
+    "uuid": "^11.1.0"
   }
 }

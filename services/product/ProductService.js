@@ -1,5 +1,9 @@
 const axios = require("axios");
 const moment = require("moment");
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+
 class ProductService {
   async getProduct(pageSize, categoryID) {
     try {
@@ -910,6 +914,104 @@ class ProductService {
         "https://www.google.com/maps/search/?api=1&query=" +
         encodeURIComponent(store.address)
     }));
+  }
+
+  async createFluxKontext(imagePath) {
+    const BFL_API_KEY = process.env.BFL_API_KEY;
+    try {
+      // Read and encode the image in base64
+      const imageBuffer = fs.readFileSync(imagePath);
+      const base64Image = imageBuffer.toString('base64');
+      const sessionId = uuidv4();
+      const outputImageDir = `Output_${sessionId}`;
+      fs.mkdirSync(outputImageDir, { recursive: true });
+  
+      // POST request to the API
+      for (let i = 1; i <= 4; i++) {
+        console.log(`Processing image run ${i}...`);
+  
+        const uploadResponse = await axios.post(
+          'https://api.us1.bfl.ai/v1/flux-kontext-pro',
+          {
+            prompt: 'Replace mannequin with a brazillian woman with 5 feet 7 inches height. Make the woman wear heavy necklace and earrings. Make the background an opulent mughal palace. Keep aspect ratio as 9:16. Fashion photography, High fashion pose. Dont change the lehenga details.',
+            // prompt: "Full body shot, back facing pose of man wearing tshirt and black jeans and make the background a busy new york street. Aspect ratio of 9:16. Fashion photography, High fashion pose. Make the man look down towards the road on the left.",
+            // prompt: "Full body shot of a Brazillian man wearing tshirt, with black shorts and white shoes and make the background a beach woodfront. Aspect ratio of 9:16. Fashion photography, High fashion pose. No sunglasses",
+            input_image: base64Image,
+            safety_tolerance: 2
+          },
+          {
+            headers: {
+              'accept': 'application/json',
+              'x-key': BFL_API_KEY,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+  
+        const requestId = uploadResponse.data.id;
+        const resultImageUrl = await this.pollForResult(requestId);
+  
+        if (resultImageUrl) {
+          const outputPath = path.join(outputImageDir, `result-${i}.jpg`);
+          await this.downloadImage(resultImageUrl, outputPath);
+          console.log(`Saved: result-${i}.jpg`);
+        } else {
+          console.warn(`Run ${i} failed or returned no image.`);
+        }
+      }
+      console.log(`All results saved in folder: ${outputImageDir}`)
+      return `All results saved in folder: ${outputImageDir}`
+      
+    } catch (error) {
+      console.error('Error sending image:', error.response?.data || error.message);
+    }
+    finally{
+      fs.unlinkSync(imagePath);
+    }
+  }
+  async pollForResult(requestId) {
+    console.log('Polling for result...');
+    const BFL_API_KEY = process.env.BFL_API_KEY;
+    while (true) {
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5s delay
+
+        const pollResponse = await axios.get(
+          'https://api.us1.bfl.ai/v1/get_result',
+          {
+            headers: {
+              accept: 'application/json',
+              'x-key': BFL_API_KEY,
+            },
+            params: { id: requestId },
+          }
+        );
+
+        const status = pollResponse.data.status;
+        console.log(`Polling [${requestId}] status:`, status);
+
+        if (status === 'Ready') {
+          return pollResponse.data.result?.sample;
+        }
+
+      } catch (error) {
+        console.error('Polling error:', error.response?.data || error.message);
+        break;
+      }
+    }
+  }
+  async downloadImage(url, filePath) {
+    try {
+      const response = await axios.get(url, { responseType: 'stream' });
+      const writer = fs.createWriteStream(filePath);
+      response.data.pipe(writer);
+      return new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
+    } catch (error) {
+      console.error('Error downloading image:', error.response?.data || error.message);
+    }
   }
 }
 
