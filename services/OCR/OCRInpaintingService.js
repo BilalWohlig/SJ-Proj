@@ -105,7 +105,7 @@ class CompleteEnhancedOCRInpaintingService {
             if (!targetTextInfo || (!targetTextInfo.coordinates && !targetTextInfo.individualCoordinates)) {
                 const errorMsg = isMultipleSearch 
                     ? `Could not locate any of the target texts precisely in OCR results`
-                    : `Could not locate target text "${geminiResult.completeText || geminiResult.targetValue}" precisely in OCR results`;
+                    : `Could not locate target text "${geminiResult.targetValue}" precisely in OCR results`;
                 throw new Error(errorMsg);
             }
 
@@ -470,47 +470,9 @@ Respond in JSON format:
                 let matchType = "complete_field";
                 
                 if (!bestMatch) {
-                    // Step 2: Try to find field and value separately then handle based on distance
+                    // Step 2: Try to find field and value separately then combine
                     bestMatch = this.findFieldValueSeparately(ocrTexts, field.fieldPart, field.valuePart);
-                    
-                    if (bestMatch && bestMatch.separateAreas) {
-                        // Handle separate masking for distant field-value pairs
-                        console.log(`Using separate masking for distant field-value pair`);
-                        
-                        // Add each area separately to individual coordinates
-                        for (const area of bestMatch.separateAreas) {
-                            individualCoordinates.push({
-                                fieldName: `${field.fieldName}_${area.type}`,
-                                coordinates: area.coordinates,
-                                area: this.calculateArea(area.coordinates),
-                                type: area.type, // 'field' or 'value'
-                                originalFieldName: field.fieldName
-                            });
-                            
-                            // Add to grouped texts for highlighting
-                            allGroupedTexts.push({
-                                text: area.text,
-                                coordinates: area.coordinates
-                            });
-                        }
-                        
-                        allFoundTexts.push({
-                            fieldName: field.fieldName,
-                            completeText: completeText,
-                            coordinates: null, // No single coordinate area
-                            separateAreas: bestMatch.separateAreas,
-                            confidence: bestMatch.confidence,
-                            matchedText: bestMatch.matchedText,
-                            matchType: "separate_field_value",
-                            distance: bestMatch.distance,
-                            matchMethod: bestMatch.matchMethod || "unknown"
-                        });
-                        
-                        console.log(`✅ Found separate matches for "${completeText}" using ${bestMatch.matchMethod} method (distance: ${bestMatch.distance?.toFixed(0)}px)`);
-                        continue; // Skip normal coordinate processing
-                    } else if (bestMatch) {
-                        matchType = `separate_field_value_combined_${bestMatch.matchMethod || 'unknown'}`;
-                    }
+                    matchType = "separate_field_value";
                 }
                 
                 if (!bestMatch) {
@@ -615,250 +577,62 @@ Respond in JSON format:
     }
 
     /**
-     * Find field part and value part using hierarchical matching approach
-     * Enhanced with exact → includes → similarity matching strategy
+     * Find field part and value part separately, then combine their coordinates
      */
     findFieldValueSeparately(ocrTexts, fieldPart, valuePart) {
-        console.log(`\n=== Hierarchical Field-Value Matching ===`);
-        console.log(`Looking for fieldPart: "${fieldPart}"`);
-        console.log(`Looking for valuePart: "${valuePart}"`);
-        console.log(`Available OCR texts: [${ocrTexts.map(t => `"${t.text}"`).join(', ')}]`);
-        
-        // Step 1: Try exact matching (highest priority)
-        console.log(`\n--- Step 1: Exact Matching ---`);
-        const exactResult = this.findFieldValueExact(ocrTexts, fieldPart, valuePart);
-        if (exactResult) {
-            console.log(`✅ Exact matching successful`);
-            return this.processFieldValueResult(exactResult, "exact");
-        }
-        
-        // Step 2: Try includes matching (medium priority)
-        console.log(`\n--- Step 2: Includes Matching ---`);
-        const includesResult = this.findFieldValueIncludes(ocrTexts, fieldPart, valuePart);
-        if (includesResult) {
-            console.log(`✅ Includes matching successful`);
-            return this.processFieldValueResult(includesResult, "includes");
-        }
-        
-        // Step 3: Try similarity matching (lowest priority)
-        console.log(`\n--- Step 3: Similarity Matching ---`);
-        const similarityResult = this.findFieldValueSimilarity(ocrTexts, fieldPart, valuePart, 0.7);
-        if (similarityResult) {
-            console.log(`✅ Similarity matching successful`);
-            return this.processFieldValueResult(similarityResult, "similarity");
-        }
-        
-        console.log(`❌ All matching strategies failed for "${fieldPart}" and "${valuePart}"`);
-        return null;
-    }
-
-    /**
-     * Step 1: Exact matching for field and value
-     */
-    findFieldValueExact(ocrTexts, fieldPart, valuePart) {
-        console.log(`Trying exact matching...`);
+        console.log(`Trying to find field "${fieldPart}" and value "${valuePart}" separately`);
         
         let fieldMatch = null;
         let valueMatch = null;
+        const allMatchedTexts = [];
         
-        // Find exact field match
+        // Find field part
         for (const ocrText of ocrTexts) {
-            if (ocrText.text.trim() === fieldPart.trim()) {
+            if (ocrText.text.trim().toLowerCase().includes(fieldPart.toLowerCase().replace(/[:.]/g, ''))) {
                 fieldMatch = ocrText;
-                console.log(`Found exact field match: "${ocrText.text}"`);
+                allMatchedTexts.push(ocrText);
+                console.log(`Found field part: "${ocrText.text}"`);
                 break;
             }
         }
         
-        // Find exact value match
-        for (const ocrText of ocrTexts) {
-            if (ocrText.text.trim() === valuePart.trim()) {
-                valueMatch = ocrText;
-                console.log(`Found exact value match: "${ocrText.text}"`);
-                break;
-            }
-        }
-        
-        if (fieldMatch && valueMatch) {
-            return { fieldMatch, valueMatch };
-        }
-        
-        console.log(`Exact matching failed - Field: ${!!fieldMatch}, Value: ${!!valueMatch}`);
-        return null;
-    }
-
-    /**
-     * Step 2: Includes matching for field and value
-     */
-    findFieldValueIncludes(ocrTexts, fieldPart, valuePart) {
-        console.log(`Trying includes matching...`);
-        
-        let fieldMatch = null;
-        let valueMatch = null;
-        
-        // Find field using includes (remove punctuation for matching)
-        const cleanFieldPart = fieldPart.replace(/[:.,-]/g, '').toLowerCase();
-        for (const ocrText of ocrTexts) {
-            const cleanOcrText = ocrText.text.replace(/[:.,-]/g, '').toLowerCase();
-            if (cleanOcrText.includes(cleanFieldPart) || cleanFieldPart.includes(cleanOcrText)) {
-                fieldMatch = ocrText;
-                console.log(`Found includes field match: "${ocrText.text}" (matches "${fieldPart}")`);
-                break;
-            }
-        }
-        
-        // Find value using includes
-        for (const ocrText of ocrTexts) {
-            if (ocrText.text.includes(valuePart) || valuePart.includes(ocrText.text)) {
-                valueMatch = ocrText;
-                console.log(`Found includes value match: "${ocrText.text}" (matches "${valuePart}")`);
-                break;
-            }
-        }
-        
-        if (fieldMatch && valueMatch) {
-            return { fieldMatch, valueMatch };
-        }
-        
-        console.log(`Includes matching failed - Field: ${!!fieldMatch}, Value: ${!!valueMatch}`);
-        return null;
-    }
-
-    /**
-     * Step 3: Similarity matching for field and value
-     */
-    findFieldValueSimilarity(ocrTexts, fieldPart, valuePart, threshold = 0.7) {
-        console.log(`Trying similarity matching with threshold ${threshold}...`);
-        
-        let fieldMatch = null;
-        let valueMatch = null;
-        let bestFieldScore = 0;
-        let bestValueScore = 0;
-        
-        // Find field using similarity
-        for (const ocrText of ocrTexts) {
-            const similarity = this.calculateSimilarity(fieldPart.toLowerCase(), ocrText.text.toLowerCase());
-            console.log(`  Field similarity: "${fieldPart}" vs "${ocrText.text}" = ${similarity.toFixed(3)}`);
+        // Find value part near the field
+        if (fieldMatch && valuePart) {
+            const fieldY = (fieldMatch.coordinates[0].y + fieldMatch.coordinates[2].y) / 2;
+            const fieldRightX = Math.max(...fieldMatch.coordinates.map(c => c.x));
             
-            if (similarity > bestFieldScore && similarity >= threshold) {
-                bestFieldScore = similarity;
-                fieldMatch = ocrText;
+            // Look for value within reasonable distance from field
+            for (const ocrText of ocrTexts) {
+                const textY = (ocrText.coordinates[0].y + ocrText.coordinates[2].y) / 2;
+                const textLeftX = Math.min(...ocrText.coordinates.map(c => c.x));
+                
+                // Check if text is on similar Y level and to the right of field
+                const yDiff = Math.abs(fieldY - textY);
+                const xDiff = textLeftX - fieldRightX;
+                
+                if (yDiff < 20 && xDiff >= -10 && xDiff <= 100) { // Reasonable proximity
+                    if (ocrText.text.trim().includes(valuePart.trim())) {
+                        valueMatch = ocrText;
+                        allMatchedTexts.push(ocrText);
+                        console.log(`Found value part: "${ocrText.text}"`);
+                        break;
+                    }
+                }
             }
         }
         
-        if (fieldMatch) {
-            console.log(`Found similarity field match: "${fieldMatch.text}" (score: ${bestFieldScore.toFixed(3)})`);
-        }
-        
-        // Find value using similarity
-        for (const ocrText of ocrTexts) {
-            const similarity = this.calculateSimilarity(valuePart.toLowerCase(), ocrText.text.toLowerCase());
-            console.log(`  Value similarity: "${valuePart}" vs "${ocrText.text}" = ${similarity.toFixed(3)}`);
-            
-            if (similarity > bestValueScore && similarity >= threshold) {
-                bestValueScore = similarity;
-                valueMatch = ocrText;
-            }
-        }
-        
-        if (valueMatch) {
-            console.log(`Found similarity value match: "${valueMatch.text}" (score: ${bestValueScore.toFixed(3)})`);
-        }
-        
-        if (fieldMatch && valueMatch) {
-            return { fieldMatch, valueMatch };
-        }
-        
-        console.log(`Similarity matching failed - Field: ${!!fieldMatch}, Value: ${!!valueMatch}`);
-        return null;
-    }
-
-    /**
-     * Process field-value result and determine separate vs combined masking
-     */
-    processFieldValueResult(result, matchType) {
-        const { fieldMatch, valueMatch } = result;
-        const separateMatches = [];
-        
-        // Add field match
-        separateMatches.push({
-            type: 'field',
-            text: fieldMatch.text,
-            coordinates: fieldMatch.coordinates
-        });
-        
-        // Add value match
-        separateMatches.push({
-            type: 'value',
-            text: valueMatch.text,
-            coordinates: valueMatch.coordinates
-        });
-        
-        // Calculate distance between field and value
-        const distance = this.calculateDistance(fieldMatch.coordinates, valueMatch.coordinates);
-        const isDistant = distance > 150; // Threshold for "distant" vs "close"
-        
-        console.log(`Field-value distance: ${distance.toFixed(0)}px (${isDistant ? 'distant' : 'close'})`);
-        
-        if (isDistant) {
-            console.log(`Using separate masking for distant field-value pair`);
-            
-            // Return structure for separate masking
-            return {
-                separateAreas: separateMatches,
-                maskingType: 'separate_field_value',
-                fieldCoordinates: fieldMatch.coordinates,
-                valueCoordinates: valueMatch.coordinates,
-                confidence: matchType === 'exact' ? 1.0 : matchType === 'includes' ? 0.9 : 0.8,
-                matchedText: `${fieldMatch.text} + ${valueMatch.text} (separate)`,
-                distance: distance,
-                matchMethod: matchType
-            };
-        } else {
-            console.log(`Using combined masking for close field-value pair`);
-            
-            // Return structure for combined masking
-            const combinedCoordinates = this.combineCoordinates([fieldMatch.coordinates, valueMatch.coordinates]);
+        if (fieldMatch && (valueMatch || !valuePart)) {
+            console.log(`Successfully found field and value separately`);
+            const combinedCoordinates = this.combineCoordinates(allMatchedTexts.map(t => t.coordinates));
             return {
                 coordinates: combinedCoordinates,
-                groupedTexts: [fieldMatch, valueMatch],
-                confidence: matchType === 'exact' ? 1.0 : matchType === 'includes' ? 0.9 : 0.8,
-                matchedText: `${fieldMatch.text} ${valueMatch.text}`,
-                distance: distance,
-                matchMethod: matchType
+                groupedTexts: allMatchedTexts,
+                confidence: 0.9,
+                matchedText: allMatchedTexts.map(t => t.text).join(' ')
             };
         }
-    }
-
-    /**
-     * Calculate distance between two coordinate sets
-     */
-    calculateDistance(coords1, coords2) {
-        const center1 = {
-            x: (Math.min(...coords1.map(c => c.x)) + Math.max(...coords1.map(c => c.x))) / 2,
-            y: (Math.min(...coords1.map(c => c.y)) + Math.max(...coords1.map(c => c.y))) / 2
-        };
         
-        const center2 = {
-            x: (Math.min(...coords2.map(c => c.x)) + Math.max(...coords2.map(c => c.x))) / 2,
-            y: (Math.min(...coords2.map(c => c.y)) + Math.max(...coords2.map(c => c.y))) / 2
-        };
-        
-        return Math.sqrt(Math.pow(center2.x - center1.x, 2) + Math.pow(center2.y - center1.y, 2));
-    }
-
-    /**
-     * Helper method to clean text for better matching
-     */
-    cleanTextForMatching(text) {
-        return text.trim().toLowerCase().replace(/[:.,-\s]/g, '');
-    }
-
-    /**
-     * Helper method to normalize text for comparison
-     */
-    normalizeText(text) {
-        return text.trim().replace(/\s+/g, ' ');
+        return null;
     }
 
     /**
@@ -1203,24 +977,13 @@ Respond in JSON format:
         try {
             console.log('Creating highlighted image showing masked area...');
             
-            // Null check for coordinates
-            if (!coordinates || !Array.isArray(coordinates) || coordinates.length === 0) {
-                console.log('No valid coordinates provided for highlighting, skipping...');
-                return null;
-            }
-            
             // Get image dimensions
             const imageMetadata = await sharp(imagePath).metadata();
             const { width, height } = imageMetadata;
             
-            // Calculate bounding box with null checks
-            const xs = coordinates.map(coord => coord && coord.x !== undefined ? coord.x : 0).filter(x => x !== null);
-            const ys = coordinates.map(coord => coord && coord.y !== undefined ? coord.y : 0).filter(y => y !== null);
-            
-            if (xs.length === 0 || ys.length === 0) {
-                console.log('No valid coordinate points found, skipping highlighting...');
-                return null;
-            }
+            // Calculate bounding box
+            const xs = coordinates.map(coord => coord.x || 0);
+            const ys = coordinates.map(coord => coord.y || 0);
             
             const minX = Math.max(0, Math.min(...xs) - padding);
             const minY = Math.max(0, Math.min(...ys) - padding);
@@ -1267,13 +1030,12 @@ Respond in JSON format:
             
         } catch (error) {
             console.error('Error creating highlighted image:', error);
-            return null; // Return null instead of throwing to prevent workflow failure
+            throw error;
         }
     }
 
     /**
      * Create highlighted version showing individual field areas with different colors
-     * Enhanced to handle separate field-value areas
      */
     async createIndividualAreasHighlight(imagePath, individualCoordinates, padding = 5) {
         try {
@@ -1283,47 +1045,25 @@ Respond in JSON format:
                 throw new Error('No individual coordinates provided for highlighting');
             }
             
-            // Different colors for different types
-            const fieldColors = [
-                { r: 255, g: 0, b: 0, alpha: 0.4 },     // Red for fields
-                { r: 0, g: 255, b: 0, alpha: 0.4 },     // Green for fields
-                { r: 0, g: 0, b: 255, alpha: 0.4 }      // Blue for fields
-            ];
-            
-            const valueColors = [
-                { r: 255, g: 128, b: 0, alpha: 0.4 },   // Orange for values
-                { r: 128, g: 255, b: 0, alpha: 0.4 },   // Light green for values
-                { r: 128, g: 0, b: 255, alpha: 0.4 }    // Purple for values
+            // Different colors for each field area
+            const colors = [
+                { r: 255, g: 0, b: 0, alpha: 0.4 },     // Red
+                { r: 0, g: 255, b: 0, alpha: 0.4 },     // Green  
+                { r: 0, g: 0, b: 255, alpha: 0.4 },     // Blue
+                { r: 255, g: 255, b: 0, alpha: 0.4 },   // Yellow
+                { r: 255, g: 0, b: 255, alpha: 0.4 },   // Magenta
+                { r: 0, g: 255, b: 255, alpha: 0.4 }    // Cyan
             ];
             
             // Start with the original image
             let imageProcessor = sharp(imagePath);
             const compositeOps = [];
             
-            let fieldIndex = 0;
-            let valueIndex = 0;
-            
             // Create overlay for each individual area
             for (let i = 0; i < individualCoordinates.length; i++) {
                 const area = individualCoordinates[i];
                 const coordinates = area.coordinates;
-                
-                // Choose color based on type
-                let color;
-                let colorName;
-                if (area.type === 'field') {
-                    color = fieldColors[fieldIndex % fieldColors.length];
-                    colorName = 'red/green/blue';
-                    fieldIndex++;
-                } else if (area.type === 'value') {
-                    color = valueColors[valueIndex % valueColors.length];
-                    colorName = 'orange/light green/purple';
-                    valueIndex++;
-                } else {
-                    // Default color for combined or unknown types
-                    color = fieldColors[i % fieldColors.length];
-                    colorName = 'default';
-                }
+                const color = colors[i % colors.length];
                 
                 const xs = coordinates.map(coord => coord.x || 0);
                 const ys = coordinates.map(coord => coord.y || 0);
@@ -1353,8 +1093,7 @@ Respond in JSON format:
                     blend: 'over'
                 });
                 
-                const areaLabel = area.type ? `${area.originalFieldName || area.fieldName} (${area.type})` : area.fieldName;
-                console.log(`Created highlight for area "${areaLabel}" at (${minX}, ${minY}) with ${colorName} color`);
+                console.log(`Created highlight for field "${area.fieldName}" at (${minX}, ${minY}) with ${color.r === 255 && color.g === 0 ? 'red' : color.g === 255 && color.r === 0 ? 'green' : 'blue'} color`);
             }
             
             // Apply all overlays at once
@@ -1368,7 +1107,7 @@ Respond in JSON format:
             fs.writeFileSync(individualHighlightedPath, individualHighlightedBuffer);
             
             console.log(`Individual areas highlighted image saved to: ${individualHighlightedPath}`);
-            console.log(`Shows ${individualCoordinates.length} separate areas (fields and values masked separately when distant)`);
+            console.log(`Shows ${individualCoordinates.length} separate field areas (not combined rectangle)`);
             
             return individualHighlightedPath;
             
