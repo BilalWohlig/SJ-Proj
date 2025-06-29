@@ -9,6 +9,7 @@ const path = require('path');
 /**
  * Complete Enhanced OCR Inpainting Service with Gemini Integration
  * Handles OCR text detection, Gemini vision analysis, highlighting, and inpainting operations
+ * Supports both single and multiple text search modes
  */
 class CompleteEnhancedOCRInpaintingService {
     constructor() {
@@ -39,127 +40,162 @@ class CompleteEnhancedOCRInpaintingService {
     }
 
     /**
-     * Complete workflow with Gemini integration and enhanced Imagen 3 Capability API
+     * Complete workflow with Gemini integration (Manual masking only, no auto-masking)
+     * Supports both single and multiple text search
      */
-    async processImage(imagePath, searchText, inpaintPrompt = "clean background, seamless removal", padding = 5, useAutoMask = false, createHighlight = true) {
+    async processImage(imagePath, searchText, inpaintPrompt = "clean background, seamless removal", padding = 5, useAutoMask = false, createHighlight = true, searchTexts = null) {
         try {
-            console.log('=== Starting enhanced OCR + Gemini + Inpainting workflow ===');
+            console.log('=== Starting enhanced OCR + Gemini + Inpainting workflow (Manual masking only) ===');
             const startTime = Date.now();
             
-            // Step 1: Use Gemini to understand the image and find the target value
-            const geminiResult = await this.analyzeImageWithGemini(imagePath, searchText);
+            // Determine if we're doing single or multiple text search
+            const isMultipleSearch = searchTexts && Array.isArray(searchTexts) && searchTexts.length > 0;
+            const searchTerms = isMultipleSearch ? searchTexts : [searchText];
+            
+            console.log(`Search mode: ${isMultipleSearch ? 'Multiple' : 'Single'}`);
+            console.log(`Search terms:`, searchTerms);
+            
+            // Step 1: Use Gemini to understand the image and find the target values
+            const geminiResult = await this.analyzeImageWithGemini(imagePath, searchTerms, isMultipleSearch);
             console.log('Gemini analysis result:', geminiResult);
             
             let results;
             
-            if (useAutoMask || !geminiResult.found) {
-                console.log('Using automatic mask generation...');
-                // Fallback to automatic mask generation
-                const inpaintedPath = await this.inpaintImageWithAutoMask(
-                    imagePath, 
-                    `${inpaintPrompt}. Remove text related to "${searchText}"`,
-                    "MASK_MODE_SEMANTIC"
-                );
-                
-                results = {
-                    originalImage: imagePath,
-                    foundText: {
-                        searchText: searchText,
-                        associatedText: geminiResult.targetValue || "Auto-detected",
-                        coordinates: null,
-                        groupedTexts: [],
-                        confidence: 0.5
-                    },
-                    geminiAnalysis: geminiResult,
-                    maskImage: null, // No manual mask created
-                    highlightedImage: null, // No specific coordinates to highlight
-                    inpaintedImage: inpaintedPath,
-                    method: "auto_mask"
-                };
-            } else {
-                // Step 2: Perform OCR to get all text with coordinates
-                const ocrResults = await this.getFullOCRResults(imagePath);
-                
-                // Step 3: Find and group the target text using smart matching
-                const targetTextInfo = await this.findAndGroupTargetText(
+            if (!geminiResult.found || (isMultipleSearch && (!geminiResult.foundFields || geminiResult.foundFields.length === 0))) {
+                const errorMsg = isMultipleSearch 
+                    ? `None of the search terms ${JSON.stringify(searchTerms)} were found in the image`
+                    : `Text "${searchText}" not found in the image via Gemini analysis`;
+                throw new Error(errorMsg);
+            }
+
+            // Step 2: Perform OCR to get all text with coordinates
+            const ocrResults = await this.getFullOCRResults(imagePath);
+            
+            // Step 3: Find and group the target text using smart matching
+            let targetTextInfo;
+            if (isMultipleSearch) {
+                targetTextInfo = await this.findAndGroupMultipleTargetTexts(
                     ocrResults.individualTexts, 
-                    searchText, 
-                    geminiResult.targetValue
+                    geminiResult.foundFields
                 );
-                
-                if (!targetTextInfo || !targetTextInfo.coordinates) {
-                    console.log('Could not locate target text precisely, falling back to auto mask...');
-                    const inpaintedPath = await this.inpaintImageWithAutoMask(
-                        imagePath, 
-                        `${inpaintPrompt}. Remove "${geminiResult.targetValue}"`,
-                        "MASK_MODE_SEMANTIC"
+            } else {
+                // For single search, we need to handle complete field structure
+                if (geminiResult.completeText) {
+                    // Create a field structure for consistency
+                    const singleField = {
+                        fieldName: geminiResult.searchText,
+                        completeText: geminiResult.completeText,
+                        fieldPart: geminiResult.fieldPart || geminiResult.searchText,
+                        valuePart: geminiResult.valuePart || geminiResult.completeText
+                    };
+                    targetTextInfo = await this.findAndGroupMultipleTargetTexts(
+                        ocrResults.individualTexts, 
+                        [singleField]
                     );
-                    
-                    results = {
-                        originalImage: imagePath,
-                        foundText: {
-                            searchText: searchText,
-                            associatedText: geminiResult.targetValue,
-                            coordinates: null,
-                            groupedTexts: [],
-                            confidence: 0.6
-                        },
-                        geminiAnalysis: geminiResult,
-                        maskImage: null,
-                        highlightedImage: null,
-                        inpaintedImage: inpaintedPath,
-                        method: "auto_mask_fallback"
-                    };
                 } else {
-                    // Step 4: Create manual mask around the grouped text
-                    const maskPath = await this.createMask(imagePath, targetTextInfo.coordinates, padding);
-                    
-                    // Step 5: Create highlighted image (if requested)
-                    let highlightedPath = null;
-                    if (createHighlight) {
-                        if (targetTextInfo.groupedTexts && targetTextInfo.groupedTexts.length > 1) {
-                            // Multi-highlight for grouped texts
-                            highlightedPath = await this.createMultiHighlightedImage(
-                                imagePath, 
-                                targetTextInfo.groupedTexts, 
-                                padding
-                            );
-                        } else {
-                            // Single highlight for combined coordinates
-                            highlightedPath = await this.createHighlightedImage(
-                                imagePath, 
-                                targetTextInfo.coordinates, 
-                                padding
-                            );
-                        }
-                    }
-                    
-                    // Step 6: Inpaint with manual mask
-                    const inpaintedPath = await this.inpaintImage(imagePath, maskPath, inpaintPrompt);
-                    
-                    results = {
-                        originalImage: imagePath,
-                        foundText: {
-                            searchText: searchText,
-                            associatedText: geminiResult.targetValue,
-                            coordinates: targetTextInfo.coordinates,
-                            groupedTexts: targetTextInfo.groupedTexts,
-                            confidence: targetTextInfo.confidence
-                        },
-                        geminiAnalysis: geminiResult,
-                        maskImage: maskPath,
-                        highlightedImage: highlightedPath,
-                        inpaintedImage: inpaintedPath,
-                        method: "manual_mask"
-                    };
+                    // Fallback to old method for backward compatibility
+                    targetTextInfo = await this.findAndGroupTargetText(
+                        ocrResults.individualTexts, 
+                        searchText, 
+                        geminiResult.targetValue || geminiResult.completeText
+                    );
                 }
             }
+            
+            if (!targetTextInfo || (!targetTextInfo.coordinates && !targetTextInfo.individualCoordinates)) {
+                const errorMsg = isMultipleSearch 
+                    ? `Could not locate any of the target texts precisely in OCR results`
+                    : `Could not locate target text "${geminiResult.completeText || geminiResult.targetValue}" precisely in OCR results`;
+                throw new Error(errorMsg);
+            }
+
+            // Step 4: Create manual mask around the individual text areas (required)
+            let maskPath;
+            if (isMultipleSearch && targetTextInfo.individualCoordinates) {
+                // Create composite mask with individual areas
+                maskPath = await this.createMultiAreaMask(imagePath, targetTextInfo.individualCoordinates, padding);
+            } else {
+                // Single area mask (backward compatibility)
+                const coordinates = targetTextInfo.coordinates || targetTextInfo.individualCoordinates?.[0]?.coordinates;
+                if (!coordinates) {
+                    throw new Error('No coordinates found for masking');
+                }
+                maskPath = await this.createMask(imagePath, coordinates, padding);
+            }
+            
+            // Step 5: Create highlighted image (required)
+            let highlightedPath = null;
+            if (isMultipleSearch && targetTextInfo.allGroupedTexts && targetTextInfo.allGroupedTexts.length > 1) {
+                // Multi-highlight for multiple found texts
+                highlightedPath = await this.createMultiHighlightedImage(
+                    imagePath, 
+                    targetTextInfo.allGroupedTexts, 
+                    padding
+                );
+            } else if (targetTextInfo.groupedTexts && targetTextInfo.groupedTexts.length > 1) {
+                // Multi-highlight for grouped texts
+                highlightedPath = await this.createMultiHighlightedImage(
+                    imagePath, 
+                    targetTextInfo.groupedTexts, 
+                    padding
+                );
+            } else {
+                // Single highlight for combined coordinates
+                highlightedPath = await this.createHighlightedImage(
+                    imagePath, 
+                    targetTextInfo.coordinates, 
+                    padding
+                );
+            }
+            
+            // Step 6: Inpaint with manual mask (generates 4 samples)
+            const inpaintedPaths = await this.inpaintImage(imagePath, maskPath, inpaintPrompt);
+            
+            // Prepare found text results
+            const foundTextResults = isMultipleSearch ? {
+                searchTexts: searchTerms,
+                foundFields: geminiResult.foundFields.map(field => ({
+                    fieldName: field.fieldName,
+                    completeText: field.completeText,
+                    fieldPart: field.fieldPart,
+                    valuePart: field.valuePart,
+                    context: field.context,
+                    confidence: field.confidence
+                })),
+                allFoundTexts: targetTextInfo.allFoundTexts || [],
+                individualCoordinates: targetTextInfo.individualCoordinates || [],
+                confidence: targetTextInfo.confidence,
+                totalFound: geminiResult.foundFields.length,
+                removalType: "complete_fields",
+                maskingType: targetTextInfo.maskingType || "individual_areas"
+            } : {
+                searchText: searchText,
+                completeText: geminiResult.completeText || geminiResult.targetValue,
+                fieldPart: geminiResult.fieldPart || searchText,
+                valuePart: geminiResult.valuePart || geminiResult.targetValue,
+                coordinates: targetTextInfo.coordinates,
+                searchCoordinates: targetTextInfo.coordinates,
+                groupedTexts: targetTextInfo.groupedTexts,
+                confidence: targetTextInfo.confidence,
+                removalType: geminiResult.completeText ? "complete_field" : "value_only"
+            };
+            
+            results = {
+                originalImage: imagePath,
+                foundText: foundTextResults,
+                geminiAnalysis: geminiResult,
+                maskImage: maskPath,
+                highlightedImage: highlightedPath, // Always included
+                inpaintedImages: inpaintedPaths, // Array of 4 images
+                method: isMultipleSearch ? "manual_mask_4_samples_multiple" : "manual_mask_4_samples"
+            };
             
             const endTime = Date.now();
             const processingTime = `${(endTime - startTime) / 1000}s`;
             results.processingTime = processingTime;
             
             console.log(`=== Enhanced workflow completed successfully using ${results.method} ===`);
+            console.log(`Generated ${inpaintedPaths.length} inpainted variations`);
             
             return results;
             
@@ -170,34 +206,81 @@ class CompleteEnhancedOCRInpaintingService {
     }
 
     /**
-     * Use Gemini Vision to analyze the image and find the target value
+     * Use Gemini Vision to analyze the image and find complete field-value pairs
+     * Supports both single and multiple search terms
      */
-    async analyzeImageWithGemini(imagePath, searchText) {
+    async analyzeImageWithGemini(imagePath, searchTerms, isMultipleSearch = false) {
         try {
-            console.log(`Analyzing image with Gemini for: "${searchText}"`);
+            const searchText = Array.isArray(searchTerms) ? searchTerms.join(', ') : searchTerms;
+            console.log(`Analyzing image with Gemini for complete fields: "${searchText}"`);
             
             // Read and encode the image
             const imageBuffer = fs.readFileSync(imagePath);
             const imageBase64 = imageBuffer.toString('base64');
             
-            const prompt = `Analyze this image and find the value associated with "${searchText}". 
+            let prompt;
+            if (isMultipleSearch) {
+                prompt = `Analyze this image and find the COMPLETE field-value pairs for these field names: ${JSON.stringify(searchTerms)}. 
+
+IMPORTANT: I need to remove the ENTIRE field (both the field name AND its value), not just the value.
 
 Instructions:
-1. Look for the text "${searchText}" in the image
-2. Identify what value or text appears next to it or is associated with it
-3. Return the exact text as it appears in the image
-4. Be precise with the formatting (including spaces, hyphens, etc.)
+1. Look for each field name in the image (like "B.No.", "MFG.DATE", "EXP.DATE")
+2. Find the complete text including the field name, separator (:), and the value
+3. Return the FULL text that needs to be removed (field name + separator + value)
 
-Example: If you see "Packed On: 27-Jan-21", return "27-Jan-21"
+Example: 
+- If you see "B.No.: SHE4105", return "B.No.: SHE4105" (complete field)
+- If you see "MFG.DATE: 12/2024", return "MFG.DATE: 12/2024" (complete field)
 
 Respond in JSON format:
 {
   "found": true/false,
-  "searchText": "${searchText}",
-  "targetValue": "the exact associated value",
+  "foundFields": [
+    {
+      "fieldName": "B.No.",
+      "completeText": "B.No.: SHE4105",
+      "fieldPart": "B.No.:",
+      "valuePart": "SHE4105",
+      "context": "found at bottom of package",
+      "confidence": "high"
+    },
+    {
+      "fieldName": "MFG.DATE",
+      "completeText": "MFG.DATE: 12/2024",
+      "fieldPart": "MFG.DATE:",
+      "valuePart": "12/2024",
+      "context": "found at bottom of package",
+      "confidence": "high"
+    }
+  ],
+  "totalFound": 2,
+  "searchTerms": ${JSON.stringify(searchTerms)}
+}`;
+            } else {
+                const singleSearchTerm = Array.isArray(searchTerms) ? searchTerms[0] : searchTerms;
+                prompt = `Analyze this image and find the COMPLETE field-value pair for "${singleSearchTerm}". 
+
+IMPORTANT: I need to remove the ENTIRE field (both the field name AND its value), not just the value.
+
+Instructions:
+1. Look for the field name "${singleSearchTerm}" in the image
+2. Find the complete text including the field name, separator, and the value
+3. Return the FULL text that needs to be removed
+
+Example: If you see "B.No.: SHE4105", return "B.No.: SHE4105"
+
+Respond in JSON format:
+{
+  "found": true/false,
+  "searchText": "${singleSearchTerm}",
+  "completeText": "the complete field-value text to remove",
+  "fieldPart": "the field name part",
+  "valuePart": "the value part",
   "context": "brief description of where it was found",
   "confidence": "high/medium/low"
 }`;
+            }
 
             const imagePart = {
                 inlineData: {
@@ -210,67 +293,660 @@ Respond in JSON format:
             const response = await result.response;
             const text = response.text();
             
-            console.log('Gemini raw response:', text);
+            console.log('Gemini raw response for complete fields:', text);
             
             // Parse JSON response
             try {
                 const jsonMatch = text.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
                     const parsedResult = JSON.parse(jsonMatch[0]);
-                    if (parsedResult.found && parsedResult.targetValue) {
-                        return parsedResult;
+                    
+                    if (isMultipleSearch) {
+                        if (parsedResult.found && parsedResult.foundFields && parsedResult.foundFields.length > 0) {
+                            return parsedResult;
+                        }
+                    } else {
+                        if (parsedResult.found && parsedResult.completeText) {
+                            return parsedResult;
+                        }
                     }
                 }
             } catch (parseError) {
                 console.warn('Could not parse Gemini JSON response, using fallback');
             }
             
-            // Fallback: extract target value from text
-            const fallbackResult = this.extractTargetValueFromText(text, searchText);
-            return fallbackResult;
+            // Fallback: extract complete field-value pairs from text
+            if (isMultipleSearch) {
+                const fallbackResult = this.extractMultipleCompleteFieldsFromText(text, searchTerms);
+                return fallbackResult;
+            } else {
+                const singleSearchTerm = Array.isArray(searchTerms) ? searchTerms[0] : searchTerms;
+                const fallbackResult = this.extractCompleteFieldFromText(text, singleSearchTerm);
+                return fallbackResult;
+            }
             
         } catch (error) {
-            console.error('Error in Gemini analysis:', error);
+            console.error('Error in Gemini analysis for complete fields:', error);
             // Return fallback result
+            if (isMultipleSearch) {
+                return {
+                    found: false,
+                    foundFields: [],
+                    totalFound: 0,
+                    searchTerms: searchTerms,
+                    context: "Gemini analysis failed"
+                };
+            } else {
+                const singleSearchTerm = Array.isArray(searchTerms) ? searchTerms[0] : searchTerms;
+                return {
+                    found: false,
+                    searchText: singleSearchTerm,
+                    completeText: null,
+                    context: "Gemini analysis failed",
+                    confidence: "low"
+                };
+            }
+        }
+    }
+
+    /**
+     * Fallback method to extract complete field from Gemini text response (single search)
+     */
+    extractCompleteFieldFromText(text, searchTerm) {
+        const lines = text.split('\n');
+        let completeText = null;
+        
+        for (const line of lines) {
+            if (line.toLowerCase().includes(searchTerm.toLowerCase())) {
+                // Look for patterns like "B.No.: SHE4105" or "MFG.DATE: 12/2024"
+                const fieldPatterns = [
+                    new RegExp(`${searchTerm.replace('.', '\\.')}\\s*:?\\s*[^\\n]*`, 'i'),
+                    new RegExp(`${searchTerm.replace(/\./g, '\\.')}[:\\s]+[^\\s][^\\n]*`, 'i')
+                ];
+                
+                for (const pattern of fieldPatterns) {
+                    const matches = line.match(pattern);
+                    if (matches) {
+                        completeText = matches[0].trim();
+                        break;
+                    }
+                }
+                
+                if (completeText) break;
+            }
+        }
+        
+        return {
+            found: !!completeText,
+            searchText: searchTerm,
+            completeText: completeText,
+            fieldPart: searchTerm,
+            valuePart: completeText ? completeText.replace(searchTerm, '').replace(/^[:\s]+/, '') : null,
+            context: "Extracted from text response",
+            confidence: completeText ? "medium" : "low"
+        };
+    }
+
+    /**
+     * Fallback method to extract multiple complete fields from Gemini text response
+     */
+    extractMultipleCompleteFieldsFromText(text, searchTerms) {
+        const lines = text.split('\n');
+        const foundFields = [];
+        
+        for (const searchTerm of searchTerms) {
+            let completeText = null;
+            
+            for (const line of lines) {
+                if (line.toLowerCase().includes(searchTerm.toLowerCase())) {
+                    // Look for complete field patterns
+                    const fieldPatterns = [
+                        new RegExp(`${searchTerm.replace(/\./g, '\\.')}\\s*:?\\s*[^\\n]*`, 'i'),
+                        new RegExp(`${searchTerm.replace(/\./g, '\\.')}[:\\s]+[^\\s][^\\n]*`, 'i')
+                    ];
+                    
+                    for (const pattern of fieldPatterns) {
+                        const matches = line.match(pattern);
+                        if (matches) {
+                            completeText = matches[0].trim();
+                            break;
+                        }
+                    }
+                    
+                    if (completeText) break;
+                }
+            }
+            
+            if (completeText) {
+                const valuePart = completeText.replace(searchTerm, '').replace(/^[:\s]+/, '');
+                foundFields.push({
+                    fieldName: searchTerm,
+                    completeText: completeText,
+                    fieldPart: searchTerm,
+                    valuePart: valuePart,
+                    context: "Extracted from text response",
+                    confidence: "medium"
+                });
+            }
+        }
+        
+        return {
+            found: foundFields.length > 0,
+            foundFields: foundFields,
+            totalFound: foundFields.length,
+            searchTerms: searchTerms,
+            context: "Extracted from text response"
+        };
+    }
+
+    /**
+     * Find and group multiple complete field-value pairs in OCR results
+     * Returns individual coordinates for separate masking
+     */
+    async findAndGroupMultipleTargetTexts(ocrTexts, foundFields) {
+        try {
+            console.log(`Finding and grouping multiple complete fields:`, foundFields.map(f => f.completeText));
+            
+            if (!foundFields || foundFields.length === 0) {
+                throw new Error('No target fields provided for multiple text search');
+            }
+            
+            // Log all OCR detected texts for debugging
+            console.log('All OCR detected texts:', ocrTexts.map(t => t.text));
+            
+            const allFoundTexts = [];
+            const allGroupedTexts = [];
+            const individualCoordinates = []; // Store individual coordinates separately
+            
+            // Process each found field
+            for (const field of foundFields) {
+                const completeText = field.completeText;
+                console.log(`\n--- Processing complete field: ${field.fieldName} = "${completeText}" ---`);
+                
+                if (!completeText) continue;
+                
+                // Step 1: Try to find the complete field as one piece
+                let bestMatch = this.findCompleteFieldInOCR(ocrTexts, completeText, field.fieldPart, field.valuePart);
+                let matchType = "complete_field";
+                
+                if (!bestMatch) {
+                    // Step 2: Try to find field and value separately then handle based on distance
+                    bestMatch = this.findFieldValueSeparately(ocrTexts, field.fieldPart, field.valuePart);
+                    
+                    if (bestMatch && bestMatch.separateAreas) {
+                        // Handle separate masking for distant field-value pairs
+                        console.log(`Using separate masking for distant field-value pair`);
+                        
+                        // Add each area separately to individual coordinates
+                        for (const area of bestMatch.separateAreas) {
+                            individualCoordinates.push({
+                                fieldName: `${field.fieldName}_${area.type}`,
+                                coordinates: area.coordinates,
+                                area: this.calculateArea(area.coordinates),
+                                type: area.type, // 'field' or 'value'
+                                originalFieldName: field.fieldName
+                            });
+                            
+                            // Add to grouped texts for highlighting
+                            allGroupedTexts.push({
+                                text: area.text,
+                                coordinates: area.coordinates
+                            });
+                        }
+                        
+                        allFoundTexts.push({
+                            fieldName: field.fieldName,
+                            completeText: completeText,
+                            coordinates: null, // No single coordinate area
+                            separateAreas: bestMatch.separateAreas,
+                            confidence: bestMatch.confidence,
+                            matchedText: bestMatch.matchedText,
+                            matchType: "separate_field_value",
+                            distance: bestMatch.distance,
+                            matchMethod: bestMatch.matchMethod || "unknown"
+                        });
+                        
+                        console.log(`✅ Found separate matches for "${completeText}" using ${bestMatch.matchMethod} method (distance: ${bestMatch.distance?.toFixed(0)}px)`);
+                        continue; // Skip normal coordinate processing
+                    } else if (bestMatch) {
+                        matchType = `separate_field_value_combined_${bestMatch.matchMethod || 'unknown'}`;
+                    }
+                }
+                
+                if (!bestMatch) {
+                    // Step 3: Try similarity matching with relaxed threshold
+                    bestMatch = this.findSimilarityMatch(ocrTexts, completeText, 0.6);
+                    matchType = "similarity";
+                }
+                
+                if (bestMatch) {
+                    console.log(`✅ Found match for "${completeText}" using ${matchType} method`);
+                    
+                    // Store individual coordinates instead of combining
+                    individualCoordinates.push({
+                        fieldName: field.fieldName,
+                        coordinates: bestMatch.coordinates,
+                        area: this.calculateArea(bestMatch.coordinates)
+                    });
+                    
+                    allGroupedTexts.push(...bestMatch.groupedTexts);
+                    allFoundTexts.push({
+                        fieldName: field.fieldName,
+                        completeText: completeText,
+                        coordinates: bestMatch.coordinates,
+                        groupedTexts: bestMatch.groupedTexts,
+                        confidence: bestMatch.confidence,
+                        matchedText: bestMatch.matchedText,
+                        matchType: matchType
+                    });
+                } else {
+                    console.log(`❌ No match found for "${completeText}"`);
+                }
+            }
+            
+            if (allFoundTexts.length === 0) {
+                throw new Error(`Could not find any of the target complete fields in OCR results`);
+            }
+            
+            console.log(`\n--- Final Results ---`);
+            console.log(`Successfully matched ${allFoundTexts.length} out of ${foundFields.length} complete fields`);
+            allFoundTexts.forEach(ft => {
+                console.log(`  ${ft.fieldName}: "${ft.completeText}" (${ft.matchType})`);
+            });
+            
+            // Return individual coordinates instead of combined
             return {
-                found: false,
-                searchText: searchText,
-                targetValue: null,
-                context: "Gemini analysis failed",
-                confidence: "low"
+                individualCoordinates: individualCoordinates, // Array of separate coordinate areas
+                allFoundTexts: allFoundTexts,
+                allGroupedTexts: allGroupedTexts,
+                confidence: allFoundTexts.reduce((sum, item) => sum + item.confidence, 0) / allFoundTexts.length,
+                foundCount: allFoundTexts.length,
+                maskingType: "individual_areas" // Flag to indicate separate masking
+            };
+            
+        } catch (error) {
+            console.error('Error in finding and grouping multiple complete fields:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Calculate area of coordinates (for debugging/optimization)
+     */
+    calculateArea(coordinates) {
+        const xs = coordinates.map(coord => coord.x);
+        const ys = coordinates.map(coord => coord.y);
+        
+        const width = Math.max(...xs) - Math.min(...xs);
+        const height = Math.max(...ys) - Math.min(...ys);
+        
+        return width * height;
+    }
+
+    /**
+     * Find complete field-value pair in OCR results
+     */
+    findCompleteFieldInOCR(ocrTexts, completeText, fieldPart, valuePart) {
+        console.log(`Trying to find complete field: "${completeText}"`);
+        
+        // Group nearby texts to form potential complete fields
+        const groupedCandidates = this.groupNearbyTexts(ocrTexts);
+        
+        for (const group of groupedCandidates) {
+            const groupText = group.texts.map(t => t.text).join(' ').trim();
+            const groupTextNoSpaces = group.texts.map(t => t.text).join('').trim();
+            
+            // Check if the grouped text matches the complete field
+            if (groupText === completeText || groupTextNoSpaces === completeText ||
+                groupText.includes(fieldPart) && groupText.includes(valuePart)) {
+                
+                console.log(`Found complete field match: "${groupText}"`);
+                const combinedCoordinates = this.combineCoordinates(group.texts.map(t => t.coordinates));
+                return {
+                    coordinates: combinedCoordinates,
+                    groupedTexts: group.texts,
+                    confidence: 1.0,
+                    matchedText: groupText
+                };
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Find field part and value part using hierarchical matching approach
+     * Enhanced with exact → includes → similarity matching strategy
+     */
+    findFieldValueSeparately(ocrTexts, fieldPart, valuePart) {
+        console.log(`\n=== Hierarchical Field-Value Matching ===`);
+        console.log(`Looking for fieldPart: "${fieldPart}"`);
+        console.log(`Looking for valuePart: "${valuePart}"`);
+        console.log(`Available OCR texts: [${ocrTexts.map(t => `"${t.text}"`).join(', ')}]`);
+        
+        // Step 1: Try exact matching (highest priority)
+        console.log(`\n--- Step 1: Exact Matching ---`);
+        const exactResult = this.findFieldValueExact(ocrTexts, fieldPart, valuePart);
+        if (exactResult) {
+            console.log(`✅ Exact matching successful`);
+            return this.processFieldValueResult(exactResult, "exact");
+        }
+        
+        // Step 2: Try includes matching (medium priority)
+        console.log(`\n--- Step 2: Includes Matching ---`);
+        const includesResult = this.findFieldValueIncludes(ocrTexts, fieldPart, valuePart);
+        if (includesResult) {
+            console.log(`✅ Includes matching successful`);
+            return this.processFieldValueResult(includesResult, "includes");
+        }
+        
+        // Step 3: Try similarity matching (lowest priority)
+        console.log(`\n--- Step 3: Similarity Matching ---`);
+        const similarityResult = this.findFieldValueSimilarity(ocrTexts, fieldPart, valuePart, 0.7);
+        if (similarityResult) {
+            console.log(`✅ Similarity matching successful`);
+            return this.processFieldValueResult(similarityResult, "similarity");
+        }
+        
+        console.log(`❌ All matching strategies failed for "${fieldPart}" and "${valuePart}"`);
+        return null;
+    }
+
+    /**
+     * Step 1: Exact matching for field and value
+     */
+    findFieldValueExact(ocrTexts, fieldPart, valuePart) {
+        console.log(`Trying exact matching...`);
+        
+        let fieldMatch = null;
+        let valueMatch = null;
+        
+        // Find exact field match
+        for (const ocrText of ocrTexts) {
+            if (ocrText.text.trim() === fieldPart.trim()) {
+                fieldMatch = ocrText;
+                console.log(`Found exact field match: "${ocrText.text}"`);
+                break;
+            }
+        }
+        
+        // Find exact value match
+        for (const ocrText of ocrTexts) {
+            if (ocrText.text.trim() === valuePart.trim()) {
+                valueMatch = ocrText;
+                console.log(`Found exact value match: "${ocrText.text}"`);
+                break;
+            }
+        }
+        
+        if (fieldMatch && valueMatch) {
+            return { fieldMatch, valueMatch };
+        }
+        
+        console.log(`Exact matching failed - Field: ${!!fieldMatch}, Value: ${!!valueMatch}`);
+        return null;
+    }
+
+    /**
+     * Step 2: Includes matching for field and value
+     */
+    findFieldValueIncludes(ocrTexts, fieldPart, valuePart) {
+        console.log(`Trying includes matching...`);
+        
+        let fieldMatch = null;
+        let valueMatch = null;
+        
+        // Find field using includes (remove punctuation for matching)
+        const cleanFieldPart = fieldPart.replace(/[:.,-]/g, '').toLowerCase();
+        for (const ocrText of ocrTexts) {
+            const cleanOcrText = ocrText.text.replace(/[:.,-]/g, '').toLowerCase();
+            if (cleanOcrText.includes(cleanFieldPart) || cleanFieldPart.includes(cleanOcrText)) {
+                fieldMatch = ocrText;
+                console.log(`Found includes field match: "${ocrText.text}" (matches "${fieldPart}")`);
+                break;
+            }
+        }
+        
+        // Find value using includes
+        for (const ocrText of ocrTexts) {
+            if (ocrText.text.includes(valuePart) || valuePart.includes(ocrText.text)) {
+                valueMatch = ocrText;
+                console.log(`Found includes value match: "${ocrText.text}" (matches "${valuePart}")`);
+                break;
+            }
+        }
+        
+        if (fieldMatch && valueMatch) {
+            return { fieldMatch, valueMatch };
+        }
+        
+        console.log(`Includes matching failed - Field: ${!!fieldMatch}, Value: ${!!valueMatch}`);
+        return null;
+    }
+
+    /**
+     * Step 3: Similarity matching for field and value
+     */
+    findFieldValueSimilarity(ocrTexts, fieldPart, valuePart, threshold = 0.7) {
+        console.log(`Trying similarity matching with threshold ${threshold}...`);
+        
+        let fieldMatch = null;
+        let valueMatch = null;
+        let bestFieldScore = 0;
+        let bestValueScore = 0;
+        
+        // Find field using similarity
+        for (const ocrText of ocrTexts) {
+            const similarity = this.calculateSimilarity(fieldPart.toLowerCase(), ocrText.text.toLowerCase());
+            console.log(`  Field similarity: "${fieldPart}" vs "${ocrText.text}" = ${similarity.toFixed(3)}`);
+            
+            if (similarity > bestFieldScore && similarity >= threshold) {
+                bestFieldScore = similarity;
+                fieldMatch = ocrText;
+            }
+        }
+        
+        if (fieldMatch) {
+            console.log(`Found similarity field match: "${fieldMatch.text}" (score: ${bestFieldScore.toFixed(3)})`);
+        }
+        
+        // Find value using similarity
+        for (const ocrText of ocrTexts) {
+            const similarity = this.calculateSimilarity(valuePart.toLowerCase(), ocrText.text.toLowerCase());
+            console.log(`  Value similarity: "${valuePart}" vs "${ocrText.text}" = ${similarity.toFixed(3)}`);
+            
+            if (similarity > bestValueScore && similarity >= threshold) {
+                bestValueScore = similarity;
+                valueMatch = ocrText;
+            }
+        }
+        
+        if (valueMatch) {
+            console.log(`Found similarity value match: "${valueMatch.text}" (score: ${bestValueScore.toFixed(3)})`);
+        }
+        
+        if (fieldMatch && valueMatch) {
+            return { fieldMatch, valueMatch };
+        }
+        
+        console.log(`Similarity matching failed - Field: ${!!fieldMatch}, Value: ${!!valueMatch}`);
+        return null;
+    }
+
+    /**
+     * Process field-value result and determine separate vs combined masking
+     */
+    processFieldValueResult(result, matchType) {
+        const { fieldMatch, valueMatch } = result;
+        const separateMatches = [];
+        
+        // Add field match
+        separateMatches.push({
+            type: 'field',
+            text: fieldMatch.text,
+            coordinates: fieldMatch.coordinates
+        });
+        
+        // Add value match
+        separateMatches.push({
+            type: 'value',
+            text: valueMatch.text,
+            coordinates: valueMatch.coordinates
+        });
+        
+        // Calculate distance between field and value
+        const distance = this.calculateDistance(fieldMatch.coordinates, valueMatch.coordinates);
+        const isDistant = distance > 150; // Threshold for "distant" vs "close"
+        
+        console.log(`Field-value distance: ${distance.toFixed(0)}px (${isDistant ? 'distant' : 'close'})`);
+        
+        if (isDistant) {
+            console.log(`Using separate masking for distant field-value pair`);
+            
+            // Return structure for separate masking
+            return {
+                separateAreas: separateMatches,
+                maskingType: 'separate_field_value',
+                fieldCoordinates: fieldMatch.coordinates,
+                valueCoordinates: valueMatch.coordinates,
+                confidence: matchType === 'exact' ? 1.0 : matchType === 'includes' ? 0.9 : 0.8,
+                matchedText: `${fieldMatch.text} + ${valueMatch.text} (separate)`,
+                distance: distance,
+                matchMethod: matchType
+            };
+        } else {
+            console.log(`Using combined masking for close field-value pair`);
+            
+            // Return structure for combined masking
+            const combinedCoordinates = this.combineCoordinates([fieldMatch.coordinates, valueMatch.coordinates]);
+            return {
+                coordinates: combinedCoordinates,
+                groupedTexts: [fieldMatch, valueMatch],
+                confidence: matchType === 'exact' ? 1.0 : matchType === 'includes' ? 0.9 : 0.8,
+                matchedText: `${fieldMatch.text} ${valueMatch.text}`,
+                distance: distance,
+                matchMethod: matchType
             };
         }
     }
 
     /**
-     * Fallback method to extract target value from Gemini text response
+     * Calculate distance between two coordinate sets
      */
-    extractTargetValueFromText(text, searchText) {
-        const lines = text.split('\n');
-        let targetValue = null;
-        
-        for (const line of lines) {
-            if (line.toLowerCase().includes(searchText.toLowerCase())) {
-                // Look for patterns like "Packed On: 27-Jan-21" or "27-Jan-21"
-                const matches = line.match(/[0-9]{1,2}[-\/][A-Za-z]{3}[-\/][0-9]{2,4}/);
-                if (matches) {
-                    targetValue = matches[0];
-                    break;
-                }
-            }
-        }
-        
-        return {
-            found: !!targetValue,
-            searchText: searchText,
-            targetValue: targetValue,
-            context: "Extracted from text response",
-            confidence: targetValue ? "medium" : "low"
+    calculateDistance(coords1, coords2) {
+        const center1 = {
+            x: (Math.min(...coords1.map(c => c.x)) + Math.max(...coords1.map(c => c.x))) / 2,
+            y: (Math.min(...coords1.map(c => c.y)) + Math.max(...coords1.map(c => c.y))) / 2
         };
+        
+        const center2 = {
+            x: (Math.min(...coords2.map(c => c.x)) + Math.max(...coords2.map(c => c.x))) / 2,
+            y: (Math.min(...coords2.map(c => c.y)) + Math.max(...coords2.map(c => c.y))) / 2
+        };
+        
+        return Math.sqrt(Math.pow(center2.x - center1.x, 2) + Math.pow(center2.y - center1.y, 2));
     }
 
     /**
-     * Smart text grouping to combine fragmented OCR results
+     * Helper method to clean text for better matching
+     */
+    cleanTextForMatching(text) {
+        return text.trim().toLowerCase().replace(/[:.,-\s]/g, '');
+    }
+
+    /**
+     * Helper method to normalize text for comparison
+     */
+    normalizeText(text) {
+        return text.trim().replace(/\s+/g, ' ');
+    }
+
+    /**
+     * Find exact match in OCR results
+     */
+    findExactMatch(ocrTexts, targetValue) {
+        console.log(`Trying exact match for: "${targetValue}"`);
+        
+        // Try to find exact match in single text elements
+        for (const ocrText of ocrTexts) {
+            if (ocrText.text.trim() === targetValue.trim()) {
+                console.log(`Found exact single match: "${ocrText.text}"`);
+                return {
+                    coordinates: ocrText.coordinates,
+                    groupedTexts: [ocrText],
+                    confidence: 1.0,
+                    matchedText: ocrText.text
+                };
+            }
+        }
+        
+        // Try to find exact match in grouped texts
+        const groupedCandidates = this.groupNearbyTexts(ocrTexts);
+        for (const group of groupedCandidates) {
+            const groupText = group.texts.map(t => t.text).join('').trim();
+            const groupTextWithSpaces = group.texts.map(t => t.text).join(' ').trim();
+            
+            if (groupText === targetValue.trim() || groupTextWithSpaces === targetValue.trim()) {
+                console.log(`Found exact group match: "${groupText}" or "${groupTextWithSpaces}"`);
+                const combinedCoordinates = this.combineCoordinates(group.texts.map(t => t.coordinates));
+                return {
+                    coordinates: combinedCoordinates,
+                    groupedTexts: group.texts,
+                    confidence: 1.0,
+                    matchedText: groupText
+                };
+            }
+        }
+        
+        console.log(`No exact match found for: "${targetValue}"`);
+        return null;
+    }
+
+    /**
+     * Find similarity match with specified threshold
+     */
+    findSimilarityMatch(ocrTexts, targetValue, threshold = 0.85) {
+        console.log(`Trying similarity match for: "${targetValue}" with threshold ${threshold}`);
+        
+        // Clean the target value for comparison
+        const cleanTargetValue = targetValue.replace(/\s+/g, '');
+        
+        // Group nearby text elements that could form the target value
+        const groupedCandidates = this.groupNearbyTexts(ocrTexts);
+        
+        // Find the best matching group
+        let bestMatch = null;
+        let bestScore = 0;
+        
+        for (const group of groupedCandidates) {
+            const groupText = group.texts.map(t => t.text).join('').replace(/\s+/g, '');
+            const similarity = this.calculateSimilarity(cleanTargetValue, groupText);
+            
+            console.log(`  Comparing "${cleanTargetValue}" vs "${groupText}" = ${similarity.toFixed(3)}`);
+            
+            if (similarity > bestScore && similarity >= threshold) {
+                bestScore = similarity;
+                bestMatch = group;
+            }
+        }
+        
+        if (bestMatch) {
+            console.log(`Found similarity match with score ${bestScore.toFixed(3)}`);
+            const combinedCoordinates = this.combineCoordinates(bestMatch.texts.map(t => t.coordinates));
+            return {
+                coordinates: combinedCoordinates,
+                groupedTexts: bestMatch.texts,
+                confidence: bestScore,
+                matchedText: bestMatch.texts.map(t => t.text).join('')
+            };
+        }
+        
+        console.log(`No similarity match found above threshold ${threshold}`);
+        return null;
+    }
+
+    /**
+     * Smart text grouping to combine fragmented OCR results (Enhanced for single search)
      */
     async findAndGroupTargetText(ocrTexts, searchText, targetValue) {
         try {
@@ -281,42 +957,43 @@ Respond in JSON format:
                 return this.findAssociatedTextFallback(ocrTexts, searchText);
             }
             
-            // Clean the target value for comparison
-            const cleanTargetValue = targetValue.replace(/\s+/g, '');
+            // Log all OCR detected texts for debugging
+            console.log('All OCR detected texts:', ocrTexts.map(t => t.text));
             
-            // Group nearby text elements that could form the target value
-            const groupedCandidates = this.groupNearbyTexts(ocrTexts);
+            // Step 1: Try exact match first (highest priority)
+            let bestMatch = this.findExactMatch(ocrTexts, targetValue);
+            let matchType = "exact";
             
-            // Find the best matching group
-            let bestMatch = null;
-            let bestScore = 0;
+            if (!bestMatch) {
+                // Step 2: Try exact substring matching  
+                bestMatch = this.findExactSubstringMatch(ocrTexts, targetValue);
+                matchType = "substring";
+            }
             
-            for (const group of groupedCandidates) {
-                const groupText = group.texts.map(t => t.text).join('').replace(/\s+/g, '');
-                const similarity = this.calculateSimilarity(cleanTargetValue, groupText);
-                
-                if (similarity > bestScore && similarity > 0.7) { // 70% similarity threshold
-                    bestScore = similarity;
-                    bestMatch = group;
-                }
+            if (!bestMatch) {
+                // Step 3: Try similarity matching with high threshold
+                bestMatch = this.findSimilarityMatch(ocrTexts, targetValue, 0.85);
+                matchType = "similarity";
+            }
+            
+            if (!bestMatch) {
+                // Step 4: Try relaxed similarity matching
+                bestMatch = this.findSimilarityMatch(ocrTexts, targetValue, 0.7);
+                matchType = "relaxed_similarity";
             }
             
             if (bestMatch) {
-                const combinedCoordinates = this.combineCoordinates(bestMatch.texts.map(t => t.coordinates));
+                console.log(`✅ Found match for "${targetValue}" using ${matchType} method: "${bestMatch.matchedText}"`);
                 return {
-                    coordinates: combinedCoordinates,
-                    groupedTexts: bestMatch.texts,
-                    confidence: bestScore,
-                    matchedText: bestMatch.texts.map(t => t.text).join('')
+                    coordinates: bestMatch.coordinates,
+                    groupedTexts: bestMatch.groupedTexts,
+                    confidence: bestMatch.confidence,
+                    matchedText: bestMatch.matchedText,
+                    matchType: matchType
                 };
             }
             
-            // Fallback: try exact substring matching
-            const exactMatch = this.findExactSubstringMatch(ocrTexts, targetValue);
-            if (exactMatch) {
-                return exactMatch;
-            }
-            
+            console.log(`❌ No match found for "${targetValue}"`);
             throw new Error(`Could not find target text "${targetValue}" in OCR results`);
             
         } catch (error) {
@@ -526,13 +1203,24 @@ Respond in JSON format:
         try {
             console.log('Creating highlighted image showing masked area...');
             
+            // Null check for coordinates
+            if (!coordinates || !Array.isArray(coordinates) || coordinates.length === 0) {
+                console.log('No valid coordinates provided for highlighting, skipping...');
+                return null;
+            }
+            
             // Get image dimensions
             const imageMetadata = await sharp(imagePath).metadata();
             const { width, height } = imageMetadata;
             
-            // Calculate bounding box
-            const xs = coordinates.map(coord => coord.x || 0);
-            const ys = coordinates.map(coord => coord.y || 0);
+            // Calculate bounding box with null checks
+            const xs = coordinates.map(coord => coord && coord.x !== undefined ? coord.x : 0).filter(x => x !== null);
+            const ys = coordinates.map(coord => coord && coord.y !== undefined ? coord.y : 0).filter(y => y !== null);
+            
+            if (xs.length === 0 || ys.length === 0) {
+                console.log('No valid coordinate points found, skipping highlighting...');
+                return null;
+            }
             
             const minX = Math.max(0, Math.min(...xs) - padding);
             const minY = Math.max(0, Math.min(...ys) - padding);
@@ -579,13 +1267,116 @@ Respond in JSON format:
             
         } catch (error) {
             console.error('Error creating highlighted image:', error);
-            throw error;
+            return null; // Return null instead of throwing to prevent workflow failure
         }
     }
 
     /**
-     * Create a highlighted version showing multiple text areas (for grouped texts)
+     * Create highlighted version showing individual field areas with different colors
+     * Enhanced to handle separate field-value areas
      */
+    async createIndividualAreasHighlight(imagePath, individualCoordinates, padding = 5) {
+        try {
+            console.log('Creating individual areas highlight for separate field masking...');
+            
+            if (!individualCoordinates || individualCoordinates.length === 0) {
+                throw new Error('No individual coordinates provided for highlighting');
+            }
+            
+            // Different colors for different types
+            const fieldColors = [
+                { r: 255, g: 0, b: 0, alpha: 0.4 },     // Red for fields
+                { r: 0, g: 255, b: 0, alpha: 0.4 },     // Green for fields
+                { r: 0, g: 0, b: 255, alpha: 0.4 }      // Blue for fields
+            ];
+            
+            const valueColors = [
+                { r: 255, g: 128, b: 0, alpha: 0.4 },   // Orange for values
+                { r: 128, g: 255, b: 0, alpha: 0.4 },   // Light green for values
+                { r: 128, g: 0, b: 255, alpha: 0.4 }    // Purple for values
+            ];
+            
+            // Start with the original image
+            let imageProcessor = sharp(imagePath);
+            const compositeOps = [];
+            
+            let fieldIndex = 0;
+            let valueIndex = 0;
+            
+            // Create overlay for each individual area
+            for (let i = 0; i < individualCoordinates.length; i++) {
+                const area = individualCoordinates[i];
+                const coordinates = area.coordinates;
+                
+                // Choose color based on type
+                let color;
+                let colorName;
+                if (area.type === 'field') {
+                    color = fieldColors[fieldIndex % fieldColors.length];
+                    colorName = 'red/green/blue';
+                    fieldIndex++;
+                } else if (area.type === 'value') {
+                    color = valueColors[valueIndex % valueColors.length];
+                    colorName = 'orange/light green/purple';
+                    valueIndex++;
+                } else {
+                    // Default color for combined or unknown types
+                    color = fieldColors[i % fieldColors.length];
+                    colorName = 'default';
+                }
+                
+                const xs = coordinates.map(coord => coord.x || 0);
+                const ys = coordinates.map(coord => coord.y || 0);
+                
+                const minX = Math.max(0, Math.min(...xs) - padding);
+                const minY = Math.max(0, Math.min(...ys) - padding);
+                const maxX = Math.max(...xs) + padding;
+                const maxY = Math.max(...ys) + padding;
+                
+                const overlayWidth = maxX - minX;
+                const overlayHeight = maxY - minY;
+                
+                // Create individual overlay
+                const overlay = await sharp({
+                    create: {
+                        width: overlayWidth,
+                        height: overlayHeight,
+                        channels: 4,
+                        background: color
+                    }
+                }).png().toBuffer();
+                
+                compositeOps.push({
+                    input: overlay,
+                    top: minY,
+                    left: minX,
+                    blend: 'over'
+                });
+                
+                const areaLabel = area.type ? `${area.originalFieldName || area.fieldName} (${area.type})` : area.fieldName;
+                console.log(`Created highlight for area "${areaLabel}" at (${minX}, ${minY}) with ${colorName} color`);
+            }
+            
+            // Apply all overlays at once
+            const individualHighlightedBuffer = await imageProcessor
+                .composite(compositeOps)
+                .png()
+                .toBuffer();
+            
+            // Save individual areas highlighted image
+            const individualHighlightedPath = imagePath.replace(path.extname(imagePath), '_individual_areas_highlighted.png');
+            fs.writeFileSync(individualHighlightedPath, individualHighlightedBuffer);
+            
+            console.log(`Individual areas highlighted image saved to: ${individualHighlightedPath}`);
+            console.log(`Shows ${individualCoordinates.length} separate areas (fields and values masked separately when distant)`);
+            
+            return individualHighlightedPath;
+            
+        } catch (error) {
+            console.error('Error creating individual areas highlight:', error);
+            throw error;
+        }
+    }
     async createMultiHighlightedImage(imagePath, groupedTexts, padding = 5, highlightColors = null) {
         try {
             console.log('Creating multi-highlighted image for grouped texts...');
@@ -665,99 +1456,13 @@ Respond in JSON format:
     }
 
     /**
-     * Use Imagen 3 Capability API for inpainting with automatic mask generation
-     */
-    async inpaintImageWithAutoMask(imagePath, prompt = "clean background, no text", maskMode = "MASK_MODE_SEMANTIC") {
-        try {
-            console.log('Starting inpainting with automatic mask generation...');
-            
-            const authClient = await this.auth.getClient();
-            const tokenResponse = await authClient.getAccessToken();
-            const accessToken = tokenResponse.token;
-            
-            const imageBuffer = fs.readFileSync(imagePath);
-            const imageBase64 = imageBuffer.toString('base64');
-            
-            const apiUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${this.projectId}/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict`;
-            
-            // Request with automatic mask generation
-            const requestBody = {
-                instances: [{
-                    prompt: prompt,
-                    referenceImages: [
-                        {
-                            referenceType: "REFERENCE_TYPE_RAW",
-                            referenceId: 1,
-                            referenceImage: {
-                                bytesBase64Encoded: imageBase64
-                            }
-                        },
-                        {
-                            referenceType: "REFERENCE_TYPE_MASK",
-                            referenceId: 2,
-                            referenceImage: {
-                                bytesBase64Encoded: imageBase64 // Same image for auto mask generation
-                            },
-                            maskImageConfig: {
-                                maskMode: maskMode,
-                                dilation: 0.05 // Slight dilation for better coverage
-                            }
-                        }
-                    ]
-                }],
-                parameters: {
-                    sampleCount: 1,
-                    safetyFilterLevel: "block_some",
-                    personGeneration: "dont_allow",
-                    language: "en"
-                }
-            };
-            
-            const response = await axios.post(apiUrl, requestBody, {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 60000
-            });
-            
-            if (response.data.predictions && response.data.predictions.length > 0) {
-                const prediction = response.data.predictions[0];
-                
-                let generatedImageBase64;
-                if (prediction.bytesBase64Encoded) {
-                    generatedImageBase64 = prediction.bytesBase64Encoded;
-                } else if (prediction.generatedImage && prediction.generatedImage.bytesBase64Encoded) {
-                    generatedImageBase64 = prediction.generatedImage.bytesBase64Encoded;
-                } else if (prediction.images && prediction.images.length > 0) {
-                    generatedImageBase64 = prediction.images[0].bytesBase64Encoded;
-                } else {
-                    throw new Error('No image data found in API response');
-                }
-                
-                const generatedImageBuffer = Buffer.from(generatedImageBase64, 'base64');
-                
-                const outputPath = imagePath.replace(path.extname(imagePath), '_auto_inpainted.png');
-                fs.writeFileSync(outputPath, generatedImageBuffer);
-                
-                console.log(`Auto-inpainted image saved to: ${outputPath}`);
-                return outputPath;
-            } else {
-                throw new Error('No predictions returned from Imagen API');
-            }
-            
-        } catch (error) {
-            console.error('Error in auto-mask inpainting:', error.response?.data || error.message);
-            throw error;
-        }
-    }
-
-    /**
      * Use Imagen 3 Capability API for inpainting with proper mask reference handling
+     * Modified to generate 4 samples and return multiple files
+     * Enhanced for complete field removal
      */
-    async inpaintImage(imagePath, maskPath, prompt = "clean background, seamless text removal`") {
+    async inpaintImage(imagePath, maskPath, prompt = "remove complete text fields, clean background matching surrounding area") {
         try {
-            console.log('Starting inpainting process with Imagen 3 Capability model...');
+            console.log('Starting inpainting process with Imagen 3 Capability model (4 samples)...');
             
             const authClient = await this.auth.getClient();
             const tokenResponse = await authClient.getAccessToken();
@@ -769,13 +1474,16 @@ Respond in JSON format:
             const imageBase64 = imageBuffer.toString('base64');
             const maskBase64 = maskBuffer.toString('base64');
             
-            // Use the new imagen-3.0-capability-001 model endpoint
+            // Use the imagen-3.0-capability-001 model endpoint
             const apiUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${this.projectId}/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict`;
             
-            // New API structure with reference images
+            // Enhanced prompt for complete field removal
+            const enhancedPrompt = `${prompt}. Remove text completely and fill with clean background that matches the surrounding packaging material. Do not generate new text, numbers, or characters. Fill the masked area with the same background texture and color as the surrounding area.`;
+            
+            // API structure with reference images - manual masking only, 4 samples
             const requestBody = {
                 instances: [{
-                    prompt: prompt,
+                    prompt: enhancedPrompt,
                     referenceImages: [
                         {
                             referenceType: "REFERENCE_TYPE_RAW",
@@ -791,53 +1499,74 @@ Respond in JSON format:
                                 bytesBase64Encoded: maskBase64
                             },
                             maskImageConfig: {
-                                maskMode: "MASK_MODE_USER_PROVIDED",
-                                dilation: 0.0
+                                maskMode: "MASK_MODE_USER_PROVIDED", // Only manual masking
+                                dilation: 0.01 // Slight dilation for better edge handling
                             }
                         }
                     ]
                 }],
                 parameters: {
-                    sampleCount: 1,
-                    // safetyFilterLevel: "block_some",
-                    // personGeneration: "dont_allow",
+                    sampleCount: 4, // Generate 4 samples
+                    guidanceScale: 12, // Moderate guidance for field removal
                     language: "en",
                     editMode: "EDIT_MODE_INPAINT_REMOVAL"
                 }
             };
             
-            console.log('Sending request to Imagen 3 Capability API...');
+            console.log('Sending request to Imagen 3 Capability API for 4 samples...');
             
             const response = await axios.post(apiUrl, requestBody, {
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 60000 // 60 second timeout
+                timeout: 120000 // 2 minute timeout for 4 samples
             });
             
             if (response.data.predictions && response.data.predictions.length > 0) {
-                const prediction = response.data.predictions[0];
+                const predictions = response.data.predictions;
+                const outputPaths = [];
                 
-                // Handle different response formats
-                let generatedImageBase64;
-                if (prediction.bytesBase64Encoded) {
-                    generatedImageBase64 = prediction.bytesBase64Encoded;
-                } else if (prediction.generatedImage && prediction.generatedImage.bytesBase64Encoded) {
-                    generatedImageBase64 = prediction.generatedImage.bytesBase64Encoded;
-                } else if (prediction.images && prediction.images.length > 0) {
-                    generatedImageBase64 = prediction.images[0].bytesBase64Encoded;
-                } else {
-                    throw new Error('No image data found in API response');
+                console.log(`Processing ${predictions.length} predictions...`);
+                
+                // Process each prediction and save as separate files
+                for (let i = 0; i < predictions.length; i++) {
+                    const prediction = predictions[i];
+                    
+                    // Handle different response formats
+                    let generatedImageBase64;
+                    if (prediction.bytesBase64Encoded) {
+                        generatedImageBase64 = prediction.bytesBase64Encoded;
+                    } else if (prediction.generatedImage && prediction.generatedImage.bytesBase64Encoded) {
+                        generatedImageBase64 = prediction.generatedImage.bytesBase64Encoded;
+                    } else if (prediction.images && prediction.images.length > 0) {
+                        generatedImageBase64 = prediction.images[0].bytesBase64Encoded;
+                    } else {
+                        console.warn(`No image data found in prediction ${i + 1}, skipping...`);
+                        continue;
+                    }
+                    
+                    const generatedImageBuffer = Buffer.from(generatedImageBase64, 'base64');
+                    
+                    // Create unique filename for each sample
+                    const outputPath = imagePath.replace(
+                        path.extname(imagePath), 
+                        `_inpainted_sample_${i + 1}.png`
+                    );
+                    
+                    fs.writeFileSync(outputPath, generatedImageBuffer);
+                    outputPaths.push(outputPath);
+                    
+                    console.log(`Inpainted sample ${i + 1} saved to: ${outputPath}`);
                 }
                 
-                const generatedImageBuffer = Buffer.from(generatedImageBase64, 'base64');
+                if (outputPaths.length === 0) {
+                    throw new Error('No valid images were generated from the predictions');
+                }
                 
-                const outputPath = imagePath.replace(path.extname(imagePath), '_inpainted.png');
-                fs.writeFileSync(outputPath, generatedImageBuffer);
+                console.log(`Successfully generated ${outputPaths.length} inpainted variations`);
+                return outputPaths; // Return array of file paths
                 
-                console.log(`Inpainted image saved to: ${outputPath}`);
-                return outputPath;
             } else {
                 throw new Error('No predictions returned from Imagen API');
             }
@@ -891,7 +1620,87 @@ Respond in JSON format:
     }
 
     /**
-     * Create mask around coordinates
+     * Create composite mask with multiple separate areas
+     */
+    async createMultiAreaMask(imagePath, individualCoordinates, padding = 5) {
+        try {
+            console.log('Creating composite mask for multiple individual areas...');
+            console.log('Individual areas to mask:', individualCoordinates.map(area => ({
+                field: area.fieldName,
+                area: area.area
+            })));
+            
+            const imageMetadata = await sharp(imagePath).metadata();
+            const { width, height } = imageMetadata;
+            
+            // Start with black background (no masking)
+            let maskBuffer = await sharp({
+                create: {
+                    width: width,
+                    height: height,
+                    channels: 3,
+                    background: { r: 0, g: 0, b: 0 }
+                }
+            }).png().toBuffer();
+            
+            // Create white rectangles for each individual area
+            const compositeOps = [];
+            
+            for (let i = 0; i < individualCoordinates.length; i++) {
+                const area = individualCoordinates[i];
+                const coordinates = area.coordinates;
+                
+                const xs = coordinates.map(coord => coord.x || 0);
+                const ys = coordinates.map(coord => coord.y || 0);
+                
+                const minX = Math.max(0, Math.min(...xs) - padding);
+                const minY = Math.max(0, Math.min(...ys) - padding);
+                const maxX = Math.min(width, Math.max(...xs) + padding);
+                const maxY = Math.min(height, Math.max(...ys) + padding);
+                
+                const maskWidth = maxX - minX;
+                const maskHeight = maxY - minY;
+                
+                console.log(`Area ${i + 1} (${area.fieldName}): ${maskWidth}x${maskHeight} at position (${minX}, ${minY})`);
+                
+                // Create white rectangle for this area
+                const whiteRect = await sharp({
+                    create: {
+                        width: maskWidth,
+                        height: maskHeight,
+                        channels: 3,
+                        background: { r: 255, g: 255, b: 255 }
+                    }
+                }).png().toBuffer();
+                
+                compositeOps.push({
+                    input: whiteRect,
+                    top: minY,
+                    left: minX,
+                    blend: 'over'
+                });
+            }
+            
+            // Apply all white rectangles to the black background
+            const finalMaskBuffer = await sharp(maskBuffer)
+                .composite(compositeOps)
+                .png()
+                .toBuffer();
+            
+            const maskPath = imagePath.replace(path.extname(imagePath), '_multi_area_mask.png');
+            fs.writeFileSync(maskPath, finalMaskBuffer);
+            
+            console.log(`Composite mask with ${individualCoordinates.length} separate areas saved to: ${maskPath}`);
+            return maskPath;
+            
+        } catch (error) {
+            console.error('Error creating multi-area mask:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Create mask around coordinates (single area)
      */
     async createMask(imagePath, coordinates, padding = 5) {
         try {
@@ -949,7 +1758,7 @@ Respond in JSON format:
     }
 
     /**
-     * Find text coordinates in image
+     * Find text coordinates in image (legacy method for single search)
      */
     async findTextCoordinates(imagePath, searchText) {
         try {
@@ -1080,7 +1889,7 @@ Respond in JSON format:
             const startTime = Date.now();
             
             const maskPath = await this.createManualMask(imagePath, boundingBox, padding);
-            const inpaintedPath = await this.inpaintImage(imagePath, maskPath, inpaintPrompt);
+            const inpaintedPaths = await this.inpaintImage(imagePath, maskPath, inpaintPrompt);
             
             const endTime = Date.now();
             const processingTime = `${(endTime - startTime) / 1000}s`;
@@ -1091,8 +1900,9 @@ Respond in JSON format:
                 originalImage: imagePath,
                 boundingBox: boundingBox,
                 maskImage: maskPath,
-                inpaintedImage: inpaintedPath,
-                processingTime: processingTime
+                inpaintedImages: inpaintedPaths, // Now returns array of 4 images
+                processingTime: processingTime,
+                method: "manual_coordinates_4_samples"
             };
             
         } catch (error) {
@@ -1147,7 +1957,7 @@ Respond in JSON format:
     }
 
     /**
-     * Clean up temporary files (preserves inpainted images)
+     * Clean up temporary files with support for multiple inpainted files
      */
     cleanupFiles(filePaths) {
         filePaths.forEach(filePath => {

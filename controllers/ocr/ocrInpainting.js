@@ -47,17 +47,19 @@ const upload = multer({
  * @memberof -OCR-Inpainting-
  * @name processImage
  * @path {POST} /api/ocr/processImage
- * @description Complete workflow to process an image: OCR -> Find text -> Create mask -> Inpaint -> Return processed image
+ * @description Complete workflow to process an image: OCR -> Find text(s) -> Create combined mask -> Inpaint (4 samples) -> Return processed images
  * @body {file} image - Image file to process (required)
- * @body {string} searchText - Text to search for and remove (required)
+ * @body {string} searchText - Single text to search for and remove (use this OR searchTexts)
+ * @body {array} searchTexts - Array of texts to search for and remove (use this OR searchText) - Example: ["Net Weight", "Batch No", "Packed On", "Best Before", "MRP"]
  * @body {string} inpaintPrompt - Custom prompt for inpainting (optional)
  * @body {number} padding - Extra padding around text for mask (optional, default: 5)
  * @body {boolean} returnOriginal - Whether to include original image in response (optional, default: false)
  * @body {boolean} returnMask - Whether to include mask image in response (optional, default: false)
+ * @body {boolean} returnHighlighted - Whether to include highlighted image in response (optional, default: true)
  * @response {string} ContentType=application/json - Response content type with image data
- * @response {string} metadata.msg=Success - Image processed successfully
- * @response {object} metadata.data - Processing results with base64 encoded images and metadata
- * @code {200} If the msg is 'Success', returns processed image and metadata
+ * @response {string} metadata.msg=Success - Images processed successfully
+ * @response {object} metadata.data - Processing results with base64 encoded images and metadata (includes 4 inpainted samples)
+ * @code {200} If the msg is 'Success', returns processed images and metadata
  * @code {400} If validation fails or required parameters are missing
  * @code {500} If there is a server error during processing
  * *** Last-Updated :- 28th June 2025 ***
@@ -65,13 +67,24 @@ const upload = multer({
 
 const validationSchema = {
   type: 'object',
-  required: ['searchText'],
+  required: [], // Will be validated in the route handler
 //   properties: {
 //     searchText: {
 //       type: 'string',
 //       minLength: 1,
 //       maxLength: 100,
-//       description: 'Text to search for in the image'
+//       description: 'Single text to search for in the image'
+//     },
+//     searchTexts: {
+//       type: 'array',
+//       items: {
+//         type: 'string',
+//         minLength: 1,
+//         maxLength: 100
+//       },
+//       minItems: 1,
+//       maxItems: 10,
+//       description: 'Multiple texts to search for in the image'
 //     },
 //     inpaintPrompt: {
 //       type: 'string',
@@ -95,12 +108,8 @@ const validationSchema = {
 //     returnHighlighted: {
 //       type: 'boolean',
 //       description: 'Whether to include highlighted image showing masked area'
-//     },
-//     useAutoMask: {
-//       type: 'boolean',
-//       description: 'Whether to use automatic mask generation instead of OCR-based masking'
 //     }
-//   },
+//   }
 };
 
 const validation = (req, res, next) => {
@@ -109,6 +118,9 @@ const validation = (req, res, next) => {
 
 router.post('/processImage', upload.single('image'), validation, async (req, res) => {
   let tempFiles = [];
+  let isMultipleSearch = false; // Declare outside try block for scope access
+  let searchTexts = null;
+  let searchText = null;
   
   try {
     // Check if image file was uploaded
@@ -120,20 +132,47 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     }
 
     const {
-      searchText,
+      searchText: reqSearchText,
+      searchTexts: reqSearchTexts,
       inpaintPrompt = 'clean background, seamless text removal',
       padding = 5,
       returnOriginal = false,
       returnMask = false,
-      returnHighlighted = false,
-      useAutoMask = false
+      returnHighlighted = true // Default to true since highlights are always generated now
     } = req.body;
+
+    // Assign to outer scope variables
+    searchText = reqSearchText;
+    searchTexts = reqSearchTexts;
+
+    // Validate that either searchText or searchTexts is provided
+    isMultipleSearch = searchTexts && Array.isArray(searchTexts) && searchTexts.length > 0;
+    const hasSingleSearch = searchText && searchText.trim().length > 0;
+    
+    if (!isMultipleSearch && !hasSingleSearch) {
+      return res.sendJson({
+        type: __constants.RESPONSE_MESSAGES.BAD_REQUEST,
+        err: 'Either searchText or searchTexts array is required'
+      });
+    }
+
+    if (isMultipleSearch && hasSingleSearch) {
+      return res.sendJson({
+        type: __constants.RESPONSE_MESSAGES.BAD_REQUEST,
+        err: 'Provide either searchText OR searchTexts, not both'
+      });
+    }
 
     const imagePath = req.file.path;
     tempFiles.push(imagePath);
 
     console.log(`Processing OCR inpainting for image: ${imagePath}`);
-    console.log(`Search text: "${searchText}"`);
+    if (isMultipleSearch) {
+      console.log(`Multiple search mode - Search texts: ${JSON.stringify(searchTexts)}`);
+    } else {
+      console.log(`Single search mode - Search text: "${searchText}"`);
+    }
+    console.log(`Will generate 4 inpainted samples with manual masking only`);
 
     // Validate the uploaded image
     const validation = await OCRInpaintingService.validateImage(imagePath);
@@ -144,45 +183,57 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       });
     }
 
-    // Process the image using OCR and inpainting
+    // Process the image using OCR and inpainting (manual masking only, 4 samples)
     const results = await OCRInpaintingService.processImage(
       imagePath,
       searchText,
       inpaintPrompt,
       parseInt(padding),
-      useAutoMask === 'true' || useAutoMask === true,
-      returnHighlighted === 'true' || returnHighlighted === true
+      false, // useAutoMask = false (manual masking only)
+      true,  // createHighlight = true (always create highlighted image)
+      isMultipleSearch ? searchTexts : null // pass searchTexts if multiple search
     );
 
     // Add generated files to cleanup list
     if (results.maskImage) tempFiles.push(results.maskImage);
     if (results.highlightedImage) tempFiles.push(results.highlightedImage);
+    
+    // Add all inpainted images to cleanup list (they are preserved by cleanupFiles method)
+    if (results.inpaintedImages && Array.isArray(results.inpaintedImages)) {
+      tempFiles.push(...results.inpaintedImages);
+    }
 
-    // Read the inpainted image and convert to base64
-    const inpaintedImageBuffer = fs.readFileSync(results.inpaintedImage);
-    const inpaintedImageBase64 = inpaintedImageBuffer.toString('base64');
-    tempFiles.push(results.inpaintedImage);
+    // Process all 4 inpainted images
+    const processedImages = [];
+    if (results.inpaintedImages && Array.isArray(results.inpaintedImages)) {
+      for (let i = 0; i < results.inpaintedImages.length; i++) {
+        const inpaintedImagePath = results.inpaintedImages[i];
+        const inpaintedImageBuffer = fs.readFileSync(inpaintedImagePath);
+        const inpaintedImageBase64 = inpaintedImageBuffer.toString('base64');
+        
+        processedImages.push({
+          data: inpaintedImageBase64,
+          mimeType: 'image/png',
+          filename: path.basename(inpaintedImagePath),
+          size: inpaintedImageBuffer.length,
+          sampleNumber: i + 1
+        });
+      }
+    }
 
-    // Prepare response data
+    // Prepare response data with all 4 samples
     const responseData = {
-      processedImage: {
-        data: inpaintedImageBase64,
-        mimeType: 'image/png',
-        filename: path.basename(results.inpaintedImage),
-        size: inpaintedImageBuffer.length
-      },
-      foundText: {
-        searchText: results.foundText.searchText,
-        associatedText: results.foundText.associatedText,
-        coordinates: results.foundText.coordinates,
-        searchCoordinates: results.foundText.searchCoordinates
-      },
+      processedImages: processedImages, // Array of 4 inpainted samples
+      samplesCount: processedImages.length,
+      searchMode: isMultipleSearch ? 'multiple' : 'single',
+      foundText: results.foundText, // This will have different structure based on search mode
       processing: {
         inpaintPrompt: inpaintPrompt,
         padding: parseInt(padding),
         processingTime: results.processingTime,
         method: results.method,
-        useAutoMask: useAutoMask === 'true' || useAutoMask === true
+        useAutoMask: false, // Always false now
+        searchMode: isMultipleSearch ? 'multiple' : 'single'
       },
       originalImage: {
         filename: req.file.filename,
@@ -195,7 +246,10 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       },
       metadata: {
         processedAt: new Date().toISOString(),
-        success: true
+        success: true,
+        note: isMultipleSearch 
+          ? `Manual masking only - 4 inpainted samples generated for ${results.foundText.foundFields?.length || 0} found fields`
+          : "Manual masking only - 4 inpainted samples generated"
       }
     };
 
@@ -217,7 +271,7 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       };
     }
 
-    // Optionally include highlighted image
+    // Include highlighted image (default behavior)
     if (returnHighlighted && results.highlightedImage) {
       const highlightedImageBuffer = fs.readFileSync(results.highlightedImage);
       responseData.highlightedImage = {
@@ -225,6 +279,16 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
         mimeType: 'image/png',
         filename: path.basename(results.highlightedImage),
         size: highlightedImageBuffer.length
+      };
+    }
+
+    // Include Gemini analysis results
+    if (results.geminiAnalysis) {
+      responseData.geminiAnalysis = {
+        found: results.geminiAnalysis.found,
+        targetValue: results.geminiAnalysis.targetValue,
+        context: results.geminiAnalysis.context,
+        confidence: results.geminiAnalysis.confidence
       };
     }
 
@@ -242,7 +306,13 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
 
     if (err.message?.includes('not found')) {
       errorType = __constants.RESPONSE_MESSAGES.NOT_FOUND;
-      errorMessage = `Text "${req.body.searchText}" not found in the image`;
+      if (isMultipleSearch && searchTexts) {
+        errorMessage = `None of the search terms ${JSON.stringify(searchTexts)} were found in the image`;
+      } else if (searchText) {
+        errorMessage = `Text "${searchText}" not found in the image`;
+      } else {
+        errorMessage = 'Searched text not found in the image';
+      }
     } else if (err.message?.includes('Invalid') || err.message?.includes('validation')) {
       errorType = __constants.RESPONSE_MESSAGES.BAD_REQUEST;
     } else if (err.message?.includes('API') || err.message?.includes('quota')) {
@@ -255,7 +325,9 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       err: errorMessage,
       metadata: {
         processedAt: new Date().toISOString(),
-        success: false
+        success: false,
+        note: "Manual masking only - process failed",
+        searchMode: isMultipleSearch ? 'multiple' : 'single'
       }
     });
   } finally {
