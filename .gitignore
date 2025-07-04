@@ -134,3 +134,4 @@ public/agreements
 /.env-stage
 public/js-docs
 public/ossWrapper
+ocrKey.json

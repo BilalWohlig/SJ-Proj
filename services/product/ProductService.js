@@ -1,4 +1,7 @@
-const axios = require("axios");
+const sharp = require('sharp');
+const axios = require('axios');
+const fs = require('fs').promises;
+const path = require('path');
 const moment = require("moment");
 class ProductService {
   async getProduct(pageSize, categoryID) {
@@ -911,6 +914,429 @@ class ProductService {
         encodeURIComponent(store.address)
     }));
   }
+
+/**
+ * Hybrid background removal: Sharp.js first, AI fallback
+ * @param {Object} options - Processing options
+ * @param {string} options.inputPath - Path to input image
+ * @param {string} options.filename - Original filename
+ * @param {string} options.originalName - Original upload name
+ * @param {string} options.targetColor - Target background color
+ * @param {boolean} options.forceAI - Force AI processing
+ * @returns {Object} Processing result
+ */
+async changeImageBackground({ inputPath, filename, originalName, targetColor = 'white', forceAI = false }) {
+  try {
+    let result;
+    let method = 'sharp';
+    
+    // Ensure directories exist
+    await this.ensureDirectories();
+
+    if (forceAI) {
+      console.log('Force AI processing requested...');
+      result = await this.processWithAI(inputPath, filename, targetColor);
+      method = 'ai';
+    } else {
+      try {
+        console.log('Attempting Sharp.js processing...');
+        result = await this.processWithSharp(inputPath, filename, targetColor);
+        
+        // Validate Sharp result quality
+        const qualityScore = await this.validateBackgroundRemoval(result.outputPath);
+        
+        if (qualityScore < 0.7) { // If quality is poor, try AI
+          console.log(`Sharp quality score: ${qualityScore}, falling back to AI...`);
+          result = await this.processWithAI(inputPath, filename, targetColor);
+          method = 'ai-fallback';
+        }
+      } catch (sharpError) {
+        console.log('Sharp processing failed, falling back to AI:', sharpError.message);
+        result = await this.processWithAI(inputPath, filename, targetColor);
+        method = 'ai-fallback';
+      }
+    }
+
+    // Save processing metadata
+    await this.saveProcessingMetadata({
+      originalFile: originalName,
+      processedFile: result.filename,
+      method: method,
+      targetColor: targetColor,
+      timestamp: new Date().toISOString(),
+      inputPath: inputPath,
+      outputPath: result.outputPath
+    });
+
+    return {
+      success: true,
+      method: method,
+      processedImage: {
+        filename: result.filename,
+        path: result.outputPath,
+        url: `/uploads/processed/${result.filename}`,
+        size: result.size || 'Unknown'
+      },
+      targetColor: targetColor,
+      quality: result.quality || 'High'
+    };
+
+  } catch (error) {
+    console.error('Error in changeImageBackground:', error);
+    throw new Error(`Background removal failed: ${error.message}`);
+  }
+}
+
+/**
+ * Process image using Sharp.js (traditional approach)
+ */
+async processWithSharp(inputPath, originalFilename, targetColor) {
+  try {
+    const outputFilename = `sharp_${Date.now()}_${originalFilename}`;
+    const outputPath = path.join('uploads/processed', outputFilename);
+
+    // Get image metadata
+    const metadata = await sharp(inputPath).metadata();
+    console.log(`Processing ${metadata.width}x${metadata.height} image with Sharp...`);
+
+    let pipeline = sharp(inputPath);
+
+    // Method 1: Color-based background removal for black backgrounds
+    if (targetColor === 'white') {
+      pipeline = pipeline
+        .threshold(30) // Convert to binary (black/white)
+        .negate() // Invert so background becomes white
+        .normalise(); // Enhance contrast
+    } else if (targetColor === 'transparent') {
+      // Create alpha channel for transparency
+      pipeline = pipeline
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true })
+        .then(({ data, info }) => {
+          // Process pixel by pixel to make black pixels transparent
+          for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            
+            // If pixel is dark (likely black background)
+            if (r < 50 && g < 50 && b < 50) {
+              data[i + 3] = 0; // Set alpha to 0 (transparent)
+            }
+          }
+          
+          return sharp(data, {
+            raw: {
+              width: info.width,
+              height: info.height,
+              channels: 4
+            }
+          }).png();
+        });
+    } else {
+      // Replace black with specific color
+      const colorMap = {
+        red: [255, 0, 0],
+        green: [0, 255, 0],
+        blue: [0, 0, 255],
+        black: [0, 0, 0]
+      };
+      
+      const [r, g, b] = colorMap[targetColor] || [255, 255, 255];
+      pipeline = pipeline.flatten({ background: { r, g, b } });
+    }
+
+    // Save the processed image
+    await pipeline.jpeg({ quality: 95 }).toFile(outputPath);
+
+    const stats = await fs.stat(outputPath);
+    
+    return {
+      outputPath,
+      filename: outputFilename,
+      size: `${(stats.size / 1024).toFixed(2)} KB`,
+      quality: 'Standard'
+    };
+
+  } catch (error) {
+    console.error('Sharp processing error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Process image using AI service (remove.bg or alternative)
+ */
+async processWithAI(inputPath, originalFilename, targetColor) {
+  try {
+    const outputFilename = `ai_${Date.now()}_${originalFilename}`;
+    const outputPath = path.join('uploads/processed', outputFilename);
+
+    console.log('Processing with AI service...');
+
+    // Option 1: Use remove.bg (requires API key)
+    if (process.env.REMOVEBG_API_KEY) {
+      await this.processWithRemoveBG(inputPath, outputPath, targetColor);
+    } 
+    // Option 2: Use WithoutBG (cheaper alternative)
+    else if (process.env.WITHOUTBG_API_KEY) {
+      await this.processWithWithoutBG(inputPath, outputPath, targetColor);
+    } 
+    // Option 3: Fallback to enhanced Sharp processing
+    else {
+      console.log('No AI API keys found, using enhanced Sharp processing...');
+      return await this.processWithEnhancedSharp(inputPath, originalFilename, targetColor);
+    }
+
+    const stats = await fs.stat(outputPath);
+    
+    return {
+      outputPath,
+      filename: outputFilename,
+      size: `${(stats.size / 1024).toFixed(2)} KB`,
+      quality: 'High'
+    };
+
+  } catch (error) {
+    console.error('AI processing error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Process with remove.bg API
+ */
+async processWithRemoveBG(inputPath, outputPath, targetColor) {
+  const imageBuffer = await fs.readFile(inputPath);
+  
+  const response = await axios.post(
+    'https://api.remove.bg/v1.0/removebg',
+    {
+      image_file_b64: imageBuffer.toString('base64'),
+      size: 'auto',
+      bg_color: targetColor === 'transparent' ? null : targetColor,
+      format: 'png'
+    },
+    {
+      headers: {
+        'X-Api-Key': process.env.REMOVEBG_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      responseType: 'arraybuffer'
+    }
+  );
+
+  await fs.writeFile(outputPath, response.data);
+  console.log('Remove.bg processing completed');
+}
+
+/**
+ * Process with WithoutBG API (cheaper alternative)
+ */
+async processWithWithoutBG(inputPath, outputPath, targetColor) {
+  const imageBuffer = await fs.readFile(inputPath);
+  
+  const response = await axios.post(
+    'https://api.withoutbg.com/v1.0/image-without-background-base64',
+    {
+      image_base64: imageBuffer.toString('base64')
+    },
+    {
+      headers: {
+        'X-API-Key': process.env.WITHOUTBG_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+
+  // Convert base64 response to buffer and save
+  const processedBuffer = Buffer.from(response.data.image_base64, 'base64');
+  
+  if (targetColor !== 'transparent' && targetColor !== 'white') {
+    // Add colored background using Sharp
+    await sharp(processedBuffer)
+      .flatten({ background: this.getColorRGB(targetColor) })
+      .png()
+      .toFile(outputPath);
+  } else {
+    await fs.writeFile(outputPath, processedBuffer);
+  }
+  
+  console.log('WithoutBG processing completed');
+}
+
+/**
+ * Enhanced Sharp processing with better edge detection
+ */
+async processWithEnhancedSharp(inputPath, originalFilename, targetColor) {
+  const outputFilename = `enhanced_${Date.now()}_${originalFilename}`;
+  const outputPath = path.join('uploads/processed', outputFilename);
+
+  // Multi-stage processing for better results
+  const pipeline = sharp(inputPath)
+    .blur(0.5) // Slight blur to smooth edges
+    .threshold(40) // More aggressive threshold
+    .median(3) // Remove noise
+    .negate(); // Invert colors
+
+  if (targetColor !== 'white') {
+    pipeline.flatten({ background: this.getColorRGB(targetColor) });
+  }
+
+  await pipeline.jpeg({ quality: 90 }).toFile(outputPath);
+  
+  const stats = await fs.stat(outputPath);
+  
+  return {
+    outputPath,
+    filename: outputFilename,
+    size: `${(stats.size / 1024).toFixed(2)} KB`,
+    quality: 'Enhanced'
+  };
+}
+
+/**
+ * Validate background removal quality (simple heuristic)
+ */
+async validateBackgroundRemoval(imagePath) {
+  try {
+    const { data, info } = await sharp(imagePath)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    let edgePixels = 0;
+    let totalPixels = info.width * info.height;
+    
+    // Simple edge detection - count pixels that might be poorly processed edges
+    for (let i = 0; i < data.length; i += info.channels) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      
+      // Check for gray pixels (often indicate poor edge processing)
+      if (r > 50 && r < 200 && Math.abs(r - g) < 30 && Math.abs(r - b) < 30) {
+        edgePixels++;
+      }
+    }
+
+    const qualityScore = 1 - (edgePixels / totalPixels);
+    return Math.max(0, Math.min(1, qualityScore));
+    
+  } catch (error) {
+    console.error('Quality validation error:', error);
+    return 0.5; // Default medium quality
+  }
+}
+
+/**
+ * Get RGB values for color names
+ */
+getColorRGB(colorName) {
+  const colors = {
+    white: { r: 255, g: 255, b: 255 },
+    black: { r: 0, g: 0, b: 0 },
+    red: { r: 255, g: 0, b: 0 },
+    green: { r: 0, g: 255, b: 0 },
+    blue: { r: 0, g: 0, b: 255 },
+    transparent: { r: 255, g: 255, b: 255 }
+  };
+  return colors[colorName] || colors.white;
+}
+
+/**
+ * Ensure required directories exist
+ */
+async ensureDirectories() {
+  const dirs = ['uploads', 'uploads/original', 'uploads/processed', 'uploads/metadata'];
+  
+  for (const dir of dirs) {
+    try {
+      await fs.access(dir);
+      console.log(`Directory exists: ${dir}`);
+    } catch {
+      await fs.mkdir(dir, { recursive: true });
+      console.log(`Created directory: ${dir}`);
+    }
+  }
+}
+
+/**
+ * Save processing metadata for tracking
+ */
+async saveProcessingMetadata(metadata) {
+  try {
+    const metadataPath = path.join('uploads/metadata', `${Date.now()}_metadata.json`);
+    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
+  } catch (error) {
+    console.error('Failed to save metadata:', error);
+    // Don't throw - this is not critical
+  }
+}
+
+/**
+ * Get list of processed images with metadata
+ */
+async getProcessedImagesList({ limit = 50, offset = 0 }) {
+  try {
+    const processedDir = 'uploads/processed';
+    const metadataDir = 'uploads/metadata';
+    
+    // Get all processed files
+    const files = await fs.readdir(processedDir);
+    const imageFiles = files
+      .filter(file => /\.(jpg|jpeg|png|webp)$/i.test(file))
+      .sort((a, b) => b.localeCompare(a)) // Sort by filename (newest first)
+      .slice(offset, offset + limit);
+
+    const results = [];
+    
+    for (const file of imageFiles) {
+      const filePath = path.join(processedDir, file);
+      const stats = await fs.stat(filePath);
+      
+      // Try to find corresponding metadata
+      let metadata = {};
+      try {
+        const metadataFiles = await fs.readdir(metadataDir);
+        const metadataFile = metadataFiles.find(mf => 
+          mf.includes(file.split('_')[1]) // Match by timestamp
+        );
+        
+        if (metadataFile) {
+          const metadataContent = await fs.readFile(
+            path.join(metadataDir, metadataFile), 
+            'utf8'
+          );
+          metadata = JSON.parse(metadataContent);
+        }
+      } catch (err) {
+        console.log('No metadata found for:', file);
+      }
+
+      results.push({
+        filename: file,
+        url: `/uploads/processed/${file}`,
+        size: `${(stats.size / 1024).toFixed(2)} KB`,
+        created: stats.ctime,
+        method: metadata.method || 'unknown',
+        targetColor: metadata.targetColor || 'unknown',
+        originalFile: metadata.originalFile || 'unknown'
+      });
+    }
+
+    return {
+      images: results,
+      total: files.length,
+      limit,
+      offset
+    };
+    
+  } catch (error) {
+    console.error('Error getting processed images list:', error);
+    throw new Error('Failed to retrieve processed images');
+  }
+}
 }
 
 module.exports = new ProductService();
