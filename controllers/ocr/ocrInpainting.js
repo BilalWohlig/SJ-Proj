@@ -9,7 +9,7 @@ const validationOfAPI = require('../../middlewares/validation');
 
 /**
  * @namespace -OCR-Inpainting-
- * @description API related to OCR text detection and inpainting operations.
+ * @description API related to OCR text detection and inpainting operations with automatic field detection.
  */
 
 // Configure multer for file uploads
@@ -47,10 +47,8 @@ const upload = multer({
  * @memberof -OCR-Inpainting-
  * @name processImage
  * @path {POST} /api/ocr/processImage
- * @description Complete workflow to process an image: OCR -> Find text(s) -> Create combined mask -> Inpaint (4 samples) -> Return processed images
+ * @description Complete workflow to process an image: Auto-detect standard fields -> OCR -> Create combined mask -> Inpaint (4 samples) -> Return processed images
  * @body {file} image - Image file to process (required)
- * @body {string} searchText - Single text to search for and remove (use this OR searchTexts)
- * @body {array} searchTexts - Array of texts to search for and remove (use this OR searchText) - Example: ["Net Weight", "Batch No", "Packed On", "Best Before", "MRP"]
  * @body {string} inpaintPrompt - Custom prompt for inpainting (optional)
  * @body {number} padding - Extra padding around text for mask (optional, default: 5)
  * @body {boolean} returnOriginal - Whether to include original image in response (optional, default: false)
@@ -62,54 +60,37 @@ const upload = multer({
  * @code {200} If the msg is 'Success', returns processed images and metadata
  * @code {400} If validation fails or required parameters are missing
  * @code {500} If there is a server error during processing
- * *** Last-Updated :- 28th June 2025 ***
+ * *** Last-Updated :- 10th July 2025 ***
  */
 
 const validationSchema = {
   type: 'object',
-  required: [], // Will be validated in the route handler
-//   properties: {
-//     searchText: {
-//       type: 'string',
-//       minLength: 1,
-//       maxLength: 100,
-//       description: 'Single text to search for in the image'
-//     },
-//     searchTexts: {
-//       type: 'array',
-//       items: {
-//         type: 'string',
-//         minLength: 1,
-//         maxLength: 100
-//       },
-//       minItems: 1,
-//       maxItems: 10,
-//       description: 'Multiple texts to search for in the image'
-//     },
-//     inpaintPrompt: {
-//       type: 'string',
-//       maxLength: 500,
-//       description: 'Custom prompt for inpainting process'
-//     },
-//     padding: {
-//       type: 'number',
-//       minimum: 0,
-//       maximum: 50,
-//       description: 'Extra padding around text for mask creation'
-//     },
-//     returnOriginal: {
-//       type: 'boolean',
-//       description: 'Whether to include original image in response'
-//     },
-//     returnMask: {
-//       type: 'boolean',
-//       description: 'Whether to include mask image in response'
-//     },
-//     returnHighlighted: {
-//       type: 'boolean',
-//       description: 'Whether to include highlighted image showing masked area'
-//     }
-//   }
+  required: [], // Only image file is required
+  // properties: {
+  //   inpaintPrompt: {
+  //     type: 'string',
+  //     maxLength: 500,
+  //     description: 'Custom prompt for inpainting process'
+  //   },
+  //   padding: {
+  //     type: 'number',
+  //     minimum: 0,
+  //     maximum: 50,
+  //     description: 'Extra padding around text for mask creation'
+  //   },
+  //   returnOriginal: {
+  //     type: 'boolean',
+  //     description: 'Whether to include original image in response'
+  //   },
+  //   returnMask: {
+  //     type: 'boolean',
+  //     description: 'Whether to include mask image in response'
+  //   },
+  //   returnHighlighted: {
+  //     type: 'boolean',
+  //     description: 'Whether to include highlighted image showing masked area'
+  //   }
+  // }
 };
 
 const validation = (req, res, next) => {
@@ -118,9 +99,6 @@ const validation = (req, res, next) => {
 
 router.post('/processImage', upload.single('image'), validation, async (req, res) => {
   let tempFiles = [];
-  let isMultipleSearch = false; // Declare outside try block for scope access
-  let searchTexts = null;
-  let searchText = null;
   
   try {
     // Check if image file was uploaded
@@ -132,47 +110,19 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     }
 
     const {
-      searchText: reqSearchText,
-      searchTexts: reqSearchTexts,
       inpaintPrompt = 'clean background, seamless text removal',
       padding = 5,
       returnOriginal = false,
       returnMask = false,
-      returnHighlighted = true // Default to true since highlights are always generated now
+      returnHighlighted = true
     } = req.body;
-
-    // Assign to outer scope variables
-    searchText = reqSearchText;
-    searchTexts = reqSearchTexts;
-
-    // Validate that either searchText or searchTexts is provided
-    isMultipleSearch = searchTexts && Array.isArray(searchTexts) && searchTexts.length > 0;
-    const hasSingleSearch = searchText && searchText.trim().length > 0;
-    
-    if (!isMultipleSearch && !hasSingleSearch) {
-      return res.sendJson({
-        type: __constants.RESPONSE_MESSAGES.BAD_REQUEST,
-        err: 'Either searchText or searchTexts array is required'
-      });
-    }
-
-    if (isMultipleSearch && hasSingleSearch) {
-      return res.sendJson({
-        type: __constants.RESPONSE_MESSAGES.BAD_REQUEST,
-        err: 'Provide either searchText OR searchTexts, not both'
-      });
-    }
 
     const imagePath = req.file.path;
     tempFiles.push(imagePath);
 
     console.log(`Processing OCR inpainting for image: ${imagePath}`);
-    if (isMultipleSearch) {
-      console.log(`Multiple search mode - Search texts: ${JSON.stringify(searchTexts)}`);
-    } else {
-      console.log(`Single search mode - Search text: "${searchText}"`);
-    }
-    console.log(`Will generate 4 inpainted samples with manual masking only`);
+    console.log(`Auto-detecting standard fields: Manufacturing Date, Expiry Date, Batch Number, MRP`);
+    console.log(`Will generate 4 inpainted samples with automatic field detection`);
 
     // Validate the uploaded image
     const validation = await OCRInpaintingService.validateImage(imagePath);
@@ -183,15 +133,12 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       });
     }
 
-    // Process the image using OCR and inpainting (manual masking only, 4 samples)
-    const results = await OCRInpaintingService.processImage(
+    // Process the image using OCR and inpainting with automatic field detection
+    const results = await OCRInpaintingService.processImageWithAutoFieldDetection(
       imagePath,
-      searchText,
       inpaintPrompt,
       parseInt(padding),
-      false, // useAutoMask = false (manual masking only)
-      true,  // createHighlight = true (always create highlighted image)
-      isMultipleSearch ? searchTexts : null // pass searchTexts if multiple search
+      true // createHighlight = true (always create highlighted image)
     );
 
     // Add generated files to cleanup list
@@ -225,15 +172,16 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     const responseData = {
       processedImages: processedImages, // Array of 4 inpainted samples
       samplesCount: processedImages.length,
-      searchMode: isMultipleSearch ? 'multiple' : 'single',
-      foundText: results.foundText, // This will have different structure based on search mode
+      searchMode: 'auto_field_detection',
+      autoDetectedFields: results.autoDetectedFields || [],
+      foundFields: results.foundText?.foundFields || [],
       processing: {
         inpaintPrompt: inpaintPrompt,
         padding: parseInt(padding),
         processingTime: results.processingTime,
         method: results.method,
-        useAutoMask: false, // Always false now
-        searchMode: isMultipleSearch ? 'multiple' : 'single'
+        autoFieldDetection: true,
+        detectedFieldsCount: results.foundText?.foundFields?.length || 0
       },
       originalImage: {
         filename: req.file.filename,
@@ -247,9 +195,7 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       metadata: {
         processedAt: new Date().toISOString(),
         success: true,
-        note: isMultipleSearch 
-          ? `Manual masking only - 4 inpainted samples generated for ${results.foundText.foundFields?.length || 0} found fields`
-          : "Manual masking only - 4 inpainted samples generated"
+        note: `Auto-detected standard fields - ${results.foundText?.foundFields?.length || 0} fields found and processed with 4 inpainted samples`
       }
     };
 
@@ -286,9 +232,9 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     if (results.geminiAnalysis) {
       responseData.geminiAnalysis = {
         found: results.geminiAnalysis.found,
-        targetValue: results.geminiAnalysis.targetValue,
-        context: results.geminiAnalysis.context,
-        confidence: results.geminiAnalysis.confidence
+        autoDetectedFields: results.geminiAnalysis.autoDetectedFields,
+        detectionConfidence: results.geminiAnalysis.detectionConfidence,
+        context: results.geminiAnalysis.context
       };
     }
 
@@ -304,15 +250,9 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     let errorType = __constants.RESPONSE_MESSAGES.SERVER_ERROR;
     let errorMessage = err.message || err;
 
-    if (err.message?.includes('not found')) {
+    if (err.message?.includes('No standard fields found')) {
       errorType = __constants.RESPONSE_MESSAGES.NOT_FOUND;
-      if (isMultipleSearch && searchTexts) {
-        errorMessage = `None of the search terms ${JSON.stringify(searchTexts)} were found in the image`;
-      } else if (searchText) {
-        errorMessage = `Text "${searchText}" not found in the image`;
-      } else {
-        errorMessage = 'Searched text not found in the image';
-      }
+      errorMessage = 'No standard fields (Manufacturing Date, Expiry Date, Batch Number, MRP) were found in the image';
     } else if (err.message?.includes('Invalid') || err.message?.includes('validation')) {
       errorType = __constants.RESPONSE_MESSAGES.BAD_REQUEST;
     } else if (err.message?.includes('API') || err.message?.includes('quota')) {
@@ -326,8 +266,8 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       metadata: {
         processedAt: new Date().toISOString(),
         success: false,
-        note: "Manual masking only - process failed",
-        searchMode: isMultipleSearch ? 'multiple' : 'single'
+        note: "Auto field detection failed",
+        searchMode: 'auto_field_detection'
       }
     });
   } finally {
