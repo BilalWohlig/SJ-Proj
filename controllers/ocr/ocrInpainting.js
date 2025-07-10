@@ -47,7 +47,7 @@ const upload = multer({
  * @memberof -OCR-Inpainting-
  * @name processImage
  * @path {POST} /api/ocr/processImage
- * @description Complete workflow to process an image: Auto-detect standard fields -> OCR -> Create combined mask -> Inpaint (4 samples) -> Return processed images
+ * @description Complete workflow to process an image: Auto-detect standard fields -> OCR -> Create mask -> Inpaint (4 samples) -> Return processed images
  * @body {file} image - Image file to process (required)
  * @body {string} inpaintPrompt - Custom prompt for inpainting (optional)
  * @body {number} padding - Extra padding around text for mask (optional, default: 5)
@@ -66,31 +66,6 @@ const upload = multer({
 const validationSchema = {
   type: 'object',
   required: [], // Only image file is required
-  // properties: {
-  //   inpaintPrompt: {
-  //     type: 'string',
-  //     maxLength: 500,
-  //     description: 'Custom prompt for inpainting process'
-  //   },
-  //   padding: {
-  //     type: 'number',
-  //     minimum: 0,
-  //     maximum: 50,
-  //     description: 'Extra padding around text for mask creation'
-  //   },
-  //   returnOriginal: {
-  //     type: 'boolean',
-  //     description: 'Whether to include original image in response'
-  //   },
-  //   returnMask: {
-  //     type: 'boolean',
-  //     description: 'Whether to include mask image in response'
-  //   },
-  //   returnHighlighted: {
-  //     type: 'boolean',
-  //     description: 'Whether to include highlighted image showing masked area'
-  //   }
-  // }
 };
 
 const validation = (req, res, next) => {
@@ -168,7 +143,7 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       }
     }
 
-    // Prepare response data with all 4 samples
+    // Prepare response data with all 4 inpainted samples
     const responseData = {
       processedImages: processedImages, // Array of 4 inpainted samples
       samplesCount: processedImages.length,
@@ -181,7 +156,15 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
         processingTime: results.processingTime,
         method: results.method,
         autoFieldDetection: true,
-        detectedFieldsCount: results.foundText?.foundFields?.length || 0
+        detectedFieldsCount: results.foundText?.foundFields?.length || 0,
+        workflowSteps: [
+          'gemini_field_detection',
+          'google_vision_ocr',
+          'gemini_ocr_selection',
+          'mask_creation',
+          'highlight_creation',
+          'imagen_inpainting'
+        ]
       },
       originalImage: {
         filename: req.file.filename,
@@ -195,7 +178,8 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       metadata: {
         processedAt: new Date().toISOString(),
         success: true,
-        note: `Auto-detected standard fields - ${results.foundText?.foundFields?.length || 0} fields found and processed with 4 inpainted samples`
+        note: `Auto-detected standard fields - ${results.foundText?.foundFields?.length || 0} fields found and processed with 4 inpainted samples`,
+        workflowComplete: true
       }
     };
 
@@ -238,6 +222,17 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       };
     }
 
+    // Include Gemini OCR selection results
+    if (results.geminiOCRSelection) {
+      responseData.geminiOCRSelection = {
+        success: results.geminiOCRSelection.success,
+        selectedFields: results.geminiOCRSelection.selectedFields,
+        totalSelectedTexts: results.geminiOCRSelection.totalSelectedTexts,
+        confidence: results.geminiOCRSelection.confidence,
+        method: results.geminiOCRSelection.method
+      };
+    }
+
     res.sendJson({
       type: __constants.RESPONSE_MESSAGES.SUCCESS,
       data: responseData,
@@ -267,7 +262,8 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
         processedAt: new Date().toISOString(),
         success: false,
         note: "Auto field detection failed",
-        searchMode: 'auto_field_detection'
+        searchMode: 'auto_field_detection',
+        workflowComplete: false
       }
     });
   } finally {

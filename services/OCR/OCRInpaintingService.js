@@ -8,7 +8,7 @@ const path = require('path');
 
 /**
  * Streamlined OCR Inpainting Service with Gemini OCR Selection
- * New Workflow: Gemini Field Detection → OCR → Gemini OCR Selection → Mask → Inpaint
+ * Workflow: Gemini Field Detection → OCR → Gemini OCR Selection → Mask → Inpaint
  */
 class StreamlinedOCRInpaintingService {
     constructor() {
@@ -35,7 +35,7 @@ class StreamlinedOCRInpaintingService {
 
         // Initialize Gemini
         this.genAI = new GoogleGenerativeAI(this.geminiApiKey);
-        this.geminiModel = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        this.geminiModel = this.genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
         // Define standard fields to auto-detect
         this.STANDARD_FIELDS = [
@@ -56,170 +56,17 @@ class StreamlinedOCRInpaintingService {
                 commonVariations: ['MRP', 'M.R.P', 'M.R.P.', 'MAX RETAIL PRICE', 'MAXIMUM RETAIL PRICE', 'RETAIL PRICE', 'PRICE', 'COST', 'RATE']
             }
         ];
+
+        // Add rate limiting
+        this.lastGeminiCall = 0;
+        this.minTimeBetweenCalls = 2000; // 2 seconds between calls
     }
 
     /**
-     * Step 7: NEW - Create inverted mask overlay and apply to all inpainted images
+     * Helper method for delay
      */
-    async applyInvertedMaskOverlay(originalImagePath, maskPath, inpaintedPaths) {
-        try {
-            console.log('=== Step 7: Creating inverted mask overlay ===');
-            
-            // Step 7a: Create inverted mask (black fields, white background)
-            const invertedMaskPath = await this.createInvertedMask(maskPath);
-            
-            // Step 7b: Combine inverted mask with original image
-            const maskedOriginalPath = await this.combineInvertedMaskWithOriginal(
-                originalImagePath, 
-                invertedMaskPath
-            );
-            
-            // Step 7c: Apply overlay to all inpainted images
-            const finalProcessedPaths = await this.overlayMaskedOriginalOnInpainted(
-                maskedOriginalPath, 
-                inpaintedPaths
-            );
-            
-            console.log('✅ Successfully applied inverted mask overlay to all inpainted images');
-            return finalProcessedPaths;
-            
-        } catch (error) {
-            console.error('Error applying inverted mask overlay:', error);
-            // Return original inpainted paths if overlay fails
-            return inpaintedPaths;
-        }
-    }
-
-    /**
-     * Step 7a: Create inverted mask (black = removed fields, white = keep area)
-     */
-    async createInvertedMask(maskPath) {
-        try {
-            console.log('Creating inverted mask...');
-            
-            // Load the original mask
-            const originalMaskBuffer = fs.readFileSync(maskPath);
-            
-            // Invert the mask: white becomes black, black becomes white
-            const invertedMaskBuffer = await sharp(originalMaskBuffer)
-                .negate() // This inverts colors: white->black, black->white
-                .png()
-                .toBuffer();
-            
-            // Save inverted mask
-            const invertedMaskPath = maskPath.replace('.png', '_inverted.png');
-            fs.writeFileSync(invertedMaskPath, invertedMaskBuffer);
-            
-            console.log(`Inverted mask saved to: ${invertedMaskPath}`);
-            return invertedMaskPath;
-            
-        } catch (error) {
-            console.error('Error creating inverted mask:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Step 7b: Combine inverted mask with original image
-     */
-    async combineInvertedMaskWithOriginal(originalImagePath, invertedMaskPath) {
-        try {
-            console.log('Combining inverted mask with original image...');
-            
-            // Load original image and inverted mask
-            const originalImage = sharp(originalImagePath);
-            const invertedMask = sharp(invertedMaskPath);
-            
-            // Get original image metadata
-            const originalMetadata = await originalImage.metadata();
-            
-            // Ensure mask is same size as original image
-            const resizedMask = await invertedMask
-                .resize(originalMetadata.width, originalMetadata.height)
-                .png()
-                .toBuffer();
-            
-            // Combine: original image where mask is white, black where mask is black
-            const maskedOriginalBuffer = await originalImage
-                .composite([{
-                    input: resizedMask,
-                    blend: 'multiply' // This will make masked areas (black) appear black
-                }])
-                .png()
-                .toBuffer();
-            
-            // Save combined image
-            const maskedOriginalPath = originalImagePath.replace(
-                path.extname(originalImagePath), 
-                '_masked_original.png'
-            );
-            fs.writeFileSync(maskedOriginalPath, maskedOriginalBuffer);
-            
-            console.log(`Masked original image saved to: ${maskedOriginalPath}`);
-            return maskedOriginalPath;
-            
-        } catch (error) {
-            console.error('Error combining inverted mask with original:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Step 7c: Overlay masked original on all inpainted images
-     */
-    async overlayMaskedOriginalOnInpainted(maskedOriginalPath, inpaintedPaths) {
-        try {
-            console.log('Overlaying masked original on all inpainted images...');
-            
-            const finalProcessedPaths = [];
-            
-            for (let i = 0; i < inpaintedPaths.length; i++) {
-                const inpaintedPath = inpaintedPaths[i];
-                
-                console.log(`Processing inpainted image ${i + 1}/${inpaintedPaths.length}...`);
-                
-                // Load inpainted image and masked original
-                const inpaintedImage = sharp(inpaintedPath);
-                const maskedOriginal = sharp(maskedOriginalPath);
-                
-                // Get inpainted image metadata
-                const inpaintedMetadata = await inpaintedImage.metadata();
-                
-                // Ensure masked original is same size as inpainted image
-                const resizedMaskedOriginal = await maskedOriginal
-                    .resize(inpaintedMetadata.width, inpaintedMetadata.height)
-                    .png()
-                    .toBuffer();
-                
-                // Overlay: inpainted image as base, masked original on top
-                // The masked original will show original image where fields were (black areas)
-                // and be transparent/white where inpainting should show through
-                const finalImageBuffer = await inpaintedImage
-                    .composite([{
-                        input: resizedMaskedOriginal,
-                        blend: 'screen' // This will overlay white areas transparently, black areas opaquely
-                    }])
-                    .png()
-                    .toBuffer();
-                
-                // Save final processed image
-                const finalPath = inpaintedPath.replace(
-                    '_inpainted_sample_', 
-                    '_final_processed_sample_'
-                );
-                fs.writeFileSync(finalPath, finalImageBuffer);
-                finalProcessedPaths.push(finalPath);
-                
-                console.log(`Final processed image ${i + 1} saved to: ${finalPath}`);
-            }
-            
-            console.log(`All ${finalProcessedPaths.length} final processed images created`);
-            return finalProcessedPaths;
-            
-        } catch (error) {
-            console.error('Error overlaying masked original on inpainted images:', error);
-            throw error;
-        }
+    delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     /**
@@ -230,7 +77,7 @@ class StreamlinedOCRInpaintingService {
             console.log('=== Starting Gemini OCR Selection workflow ===');
             const startTime = Date.now();
             
-            // Step 1: Use Gemini to detect fields
+            // Step 1: Use Gemini to detect fields with retry logic
             const geminiFieldDetection = await this.autoDetectStandardFields(imagePath);
             console.log('Step 1 - Gemini field detection result:', geminiFieldDetection);
             
@@ -257,21 +104,14 @@ class StreamlinedOCRInpaintingService {
             // Step 4: Create mask based on Gemini's OCR text selection
             const maskPath = await this.createMaskFromGeminiSelection(imagePath, geminiOCRSelection.selectedFields, padding);
             
-            // Step 5: Create highlighted image
+            // Step 5: Create highlighted image (optional)
             let highlightedPath = null;
             if (createHighlight) {
                 highlightedPath = await this.createHighlightFromGeminiSelection(imagePath, geminiOCRSelection.selectedFields, padding);
             }
             
-            // Step 6: Inpaint with 4 samples
+            // Step 6: Inpaint with 4 samples (FINAL STEP)
             const inpaintedPaths = await this.inpaintImage(imagePath, maskPath, inpaintPrompt);
-            
-            // Step 7: NEW - Create inverted mask overlay and apply to all inpainted images
-            const finalProcessedPaths = await this.applyInvertedMaskOverlay(
-                imagePath, 
-                maskPath, 
-                inpaintedPaths
-            );
             
             // Prepare response
             const foundTextResults = {
@@ -308,10 +148,14 @@ class StreamlinedOCRInpaintingService {
             results.processingTime = processingTime;
             
             console.log(`=== Gemini OCR Selection workflow completed successfully ===`);
-            console.log(`Auto-detected ${geminiFieldDetection.autoDetectedFields.length} fields`);
-            console.log(`Selected ${geminiOCRSelection.totalSelectedTexts} OCR texts`);
+            console.log(`Auto-detected ${geminiFieldDetection.autoDetectedFields.length} fields with distance analysis`);
+            console.log(`Distance analysis results:`);
+            geminiFieldDetection.autoDetectedFields.forEach(field => {
+                console.log(`  - ${field.fieldName}: ${field.distance} distance, ${field.maskingStrategy} strategy`);
+            });
+            console.log(`Selected ${geminiOCRSelection.totalSelectedTexts} OCR texts for masking`);
             console.log(`Generated ${inpaintedPaths.length} inpainted variations`);
-            console.log(`Applied inverted mask overlay to all ${finalProcessedPaths.length} final images`);
+            console.log(`Workflow completed in ${processingTime}`);
             
             return results;
             
@@ -322,36 +166,57 @@ class StreamlinedOCRInpaintingService {
     }
 
     /**
-     * Step 1: Use Gemini to automatically detect standard fields in the image
+     * Step 1: Use Gemini to automatically detect standard fields with retry logic
      */
-    async autoDetectStandardFields(imagePath) {
-        try {
-            console.log('Analyzing image with Gemini for automatic field detection...');
-            
-            // Read and encode the image
-            const imageBuffer = fs.readFileSync(imagePath);
-            const imageBase64 = imageBuffer.toString('base64');
-            
-            // Create comprehensive prompt for auto-detection
-            const prompt = `Analyze this product packaging image and automatically detect these 4 standard fields if they exist:
+    async autoDetectStandardFields(imagePath, maxRetries = 3) {
+        let lastError;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(`Analyzing image with Gemini (attempt ${attempt}/${maxRetries})...`);
+                
+                // Rate limiting
+                const timeSinceLastCall = Date.now() - this.lastGeminiCall;
+                if (timeSinceLastCall < this.minTimeBetweenCalls) {
+                    await this.delay(this.minTimeBetweenCalls - timeSinceLastCall);
+                }
+                
+                // Read and encode the image
+                const imageBuffer = fs.readFileSync(imagePath);
+                const imageBase64 = imageBuffer.toString('base64');
+                
+                // Create comprehensive prompt for auto-detection with distance analysis
+                const prompt = `Analyze this product packaging image and automatically detect these 4 standard fields if they exist:
 
 1. MANUFACTURING DATE (variations: MFG DATE, MFG DT, MFG.DATE, MFGDATE, MANUFACTURING DATE, MANUFACTURED ON, MFD, MFG, PROD DATE, PRODUCTION DATE)
 2. EXPIRY DATE (variations: EXP DATE, EXP DT, EXP.DATE, EXPDATE, EXPIRY DATE, EXPIRE DATE, EXPIRES ON, EXP, BEST BEFORE, USE BY, VALID UNTIL)
 3. BATCH NUMBER (variations: BATCH NO, BATCH NO., BATCH NUMBER, B.NO, B.NO., BNO, BATCH, LOT NO, LOT NO., LOT NUMBER, LOT, BATCH CODE, LOT CODE)
 4. MRP (variations: MRP, M.R.P, M.R.P., MAX RETAIL PRICE, MAXIMUM RETAIL PRICE, RETAIL PRICE, PRICE, COST, RATE)
 
-IMPORTANT: For each field found, I need the COMPLETE field-value pair (field name + separator + value) that needs to be removed entirely.
+CRITICAL DISTANCE ANALYSIS: For each field found, analyze the visual distance between the field name and its value:
+
+- **LOW DISTANCE** (field and value are directly connected/adjacent with no gap): Both field name AND value should be masked for inpainting
+- **HIGH DISTANCE** (field and value are separated by significant spacing or in different columns): Only the VALUE should be masked for inpainting, keep the field name
+
+Examples of LOW DISTANCE (mask both field and value):
+- "B.No.SXG0306A" (field and value directly connected)
+- "MFG.Dt.02/2025" (field and value connected with dots)
+- "EXP.Dt.07/2026" (field and value connected directly)
+- "M.R.P.₹95.00" (field and value connected with symbol)
+
+Examples of HIGH DISTANCE (mask only value):
+- "Mfg. Lic. No." in left column and "G/25/2150" in right column (separated by significant space)
+- "Batch No." in left column and "S24K016" in right column (tabular layout)
+- "Mfg. Date" in left column and "11/2024" in right column (separated layout)
+- "Max. Retail Price ₹" in left column and "69.00" in right column (split across columns)
+
+IMPORTANT: HIGH DISTANCE typically occurs in tabular layouts where field names are in one column and values are in another column, separated by significant whitespace or alignment gaps.
 
 Instructions:
 1. Look for any variation of these 4 fields in the image
-2. For each field found, extract the complete text including field name, separator, and value
-3. Identify the field type (manufacturing_date, expiry_date, batch_number, mrp)
-4. Return the FULL text that needs to be removed
-
-Example responses:
-- If you see "MFG DATE: 12/2024", return fieldType: "manufacturing_date", completeText: "MFG DATE: 12/2024"
-- If you see "B.NO.: ABC123", return fieldType: "batch_number", completeText: "B.NO.: ABC123"
-- If you see "MRP ₹25.00", return fieldType: "mrp", completeText: "MRP ₹25.00"
+2. For each field found, analyze the distance between field name and value
+3. Determine what should be masked based on distance analysis and give reason to support your decision.
+4. Return the masking strategy for each field
 
 Respond in JSON format:
 {
@@ -363,67 +228,209 @@ Respond in JSON format:
       "completeText": "MFG DATE: 12/2024",
       "fieldPart": "MFG DATE:",
       "valuePart": "12/2024",
+      "distance": "low",
+      "distanceReason": "The field MFG DATE and value 12/2024 are directly connected with no gap",
+      "maskingStrategy": "both",
+      "textToMask": "MFG DATE: 12/2024",
+      "textToKeep": "",
       "context": "found at bottom of package",
       "confidence": "high"
     },
     {
       "fieldType": "expiry_date",
       "fieldName": "EXP DATE",
-      "completeText": "EXP DATE: 12/2025",
-      "fieldPart": "EXP DATE:",
-      "valuePart": "12/2025",
-      "context": "found at bottom of package",
+      "completeText": "EXP DATE 01/2026",
+      "fieldPart": "EXP DATE",
+      "valuePart": "01/2026",
+      "distance": "high",
+      "distanceReason": "The field EXP DATE and value 01/2026 are separated by significant whitespace",
+      "maskingStrategy": "value_only",
+      "textToMask": "01/2026",
+      "textToKeep": "EXP DATE",
+      "context": "field and value are separated",
       "confidence": "high"
     }
   ],
   "detectionConfidence": "high",
   "totalFound": 2,
-  "context": "Auto-detected standard fields on product packaging"
+  "context": "Auto-detected standard fields with distance analysis"
 }`;
 
-            const imagePart = {
-                inlineData: {
-                    data: imageBase64,
-                    mimeType: this.getMimeType(imagePath)
-                }
-            };
-
-            const result = await this.geminiModel.generateContent([prompt, imagePart]);
-            const response = await result.response;
-            const text = response.text();
-            
-            console.log('Gemini raw response for auto field detection:', text);
-            
-            // Parse JSON response
-            try {
-                const jsonMatch = text.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    const parsedResult = JSON.parse(jsonMatch[0]);
-                    
-                    if (parsedResult.found && parsedResult.autoDetectedFields && parsedResult.autoDetectedFields.length > 0) {
-                        console.log(`✅ Auto-detected ${parsedResult.autoDetectedFields.length} fields:`, 
-                            parsedResult.autoDetectedFields.map(f => f.fieldType));
-                        return parsedResult;
+                const imagePart = {
+                    inlineData: {
+                        data: imageBase64,
+                        mimeType: this.getMimeType(imagePath)
                     }
+                };
+
+                const result = await this.geminiModel.generateContent([prompt, imagePart]);
+                const response = await result.response;
+                const text = response.text();
+                
+                this.lastGeminiCall = Date.now();
+                
+                console.log('Gemini raw response for auto field detection:', text);
+                
+                // Parse JSON response
+                try {
+                    const jsonMatch = text.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                        const parsedResult = JSON.parse(jsonMatch[0]);
+                        
+                        if (parsedResult.found && parsedResult.autoDetectedFields && parsedResult.autoDetectedFields.length > 0) {
+                            console.log(`✅ Auto-detected ${parsedResult.autoDetectedFields.length} fields:`, 
+                                parsedResult.autoDetectedFields.map(f => f.fieldType));
+                            return parsedResult;
+                        }
+                    }
+                } catch (parseError) {
+                    console.warn('Could not parse Gemini JSON response, using fallback');
                 }
-            } catch (parseError) {
-                console.warn('Could not parse Gemini JSON response, using fallback');
+                
+                // Fallback: try to extract fields from text response
+                const fallbackResult = this.extractStandardFieldsFromText(text);
+                if (fallbackResult.found) {
+                    return fallbackResult;
+                }
+                
+                throw new Error('No fields detected in response');
+                
+            } catch (error) {
+                lastError = error;
+                console.error(`Gemini API attempt ${attempt} failed:`, error.message);
+                
+                if (error.status === 503 || error.message.includes('overloaded')) {
+                    if (attempt < maxRetries) {
+                        // Exponential backoff with jitter
+                        const baseDelay = Math.pow(2, attempt) * 1000;
+                        const jitter = Math.random() * 1000;
+                        const waitTime = baseDelay + jitter;
+                        
+                        console.log(`⏳ Waiting ${Math.round(waitTime)}ms before retry...`);
+                        await this.delay(waitTime);
+                        continue;
+                    }
+                } else if (error.status === 429) {
+                    console.log('Rate limit exceeded, waiting longer...');
+                    await this.delay(10000);
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        // If all retries failed, use OCR-only fallback
+        console.log('All Gemini attempts failed, using OCR-only fallback...');
+        return await this.fallbackFieldDetection(imagePath);
+    }
+
+    /**
+     * OCR-only fallback when Gemini is unavailable
+     */
+    async fallbackFieldDetection(imagePath) {
+        try {
+            console.log('Using OCR-only fallback for field detection...');
+            
+            const ocrResults = await this.getFullOCRResults(imagePath);
+            
+            if (!ocrResults.individualTexts || ocrResults.individualTexts.length === 0) {
+                throw new Error('No OCR text found in image');
             }
             
-            // Fallback: try to extract fields from text response
-            const fallbackResult = this.extractStandardFieldsFromText(text);
-            return fallbackResult;
+            const detectedFields = [];
+            
+            for (const standardField of this.STANDARD_FIELDS) {
+                const fieldType = standardField.fieldType;
+                const variations = standardField.commonVariations;
+                
+                for (const ocrText of ocrResults.individualTexts) {
+                    const textUpper = ocrText.text.toUpperCase();
+                    
+                    for (const variation of variations) {
+                        if (textUpper.includes(variation)) {
+                            const fieldValue = this.findNearbyValue(ocrText, ocrResults.individualTexts);
+                            const completeText = `${ocrText.text}${fieldValue ? ' ' + fieldValue : ''}`;
+                            
+                            // Distance analysis for fallback - check if field and value are connected
+                            const isConnected = completeText.includes(variation) && !completeText.includes(' : ') && !completeText.includes('  ');
+                            const distance = isConnected ? 'low' : 'high';
+                            const maskingStrategy = distance === 'low' ? 'both' : 'value_only';
+                            const textToMask = maskingStrategy === 'both' ? completeText : valuePart;
+                            
+                            detectedFields.push({
+                                fieldType: fieldType,
+                                fieldName: variation,
+                                completeText: completeText,
+                                fieldPart: ocrText.text,
+                                valuePart: fieldValue || '',
+                                distance: distance,
+                                maskingStrategy: maskingStrategy,
+                                textToMask: textToMask,
+                                textToKeep: maskingStrategy === 'value_only' ? ocrText.text : '',
+                                context: "OCR fallback detection",
+                                confidence: "medium",
+                                coordinates: ocrText.coordinates
+                            });
+                            break;
+                        }
+                    }
+                    
+                    if (detectedFields.find(f => f.fieldType === fieldType)) {
+                        break;
+                    }
+                }
+            }
+            
+            return {
+                found: detectedFields.length > 0,
+                autoDetectedFields: detectedFields,
+                detectionConfidence: detectedFields.length > 2 ? "high" : detectedFields.length > 0 ? "medium" : "low",
+                totalFound: detectedFields.length,
+                context: "OCR fallback detection completed"
+            };
             
         } catch (error) {
-            console.error('Error in Gemini auto field detection:', error);
+            console.error('Error in OCR fallback detection:', error);
             return {
                 found: false,
                 autoDetectedFields: [],
                 detectionConfidence: "low",
                 totalFound: 0,
-                context: "Auto field detection failed"
+                context: "OCR fallback detection failed"
             };
         }
+    }
+
+    /**
+     * Helper method to find nearby value text for a field
+     */
+    findNearbyValue(fieldText, allTexts) {
+        const fieldCoords = fieldText.coordinates;
+        const fieldCenterX = fieldCoords.reduce((sum, coord) => sum + coord.x, 0) / fieldCoords.length;
+        const fieldCenterY = fieldCoords.reduce((sum, coord) => sum + coord.y, 0) / fieldCoords.length;
+        
+        const nearbyTexts = allTexts.filter(text => {
+            if (text.id === fieldText.id) return false;
+            
+            const textCoords = text.coordinates;
+            const textCenterX = textCoords.reduce((sum, coord) => sum + coord.x, 0) / textCoords.length;
+            const textCenterY = textCoords.reduce((sum, coord) => sum + coord.y, 0) / textCoords.length;
+            
+            const distance = Math.sqrt(
+                Math.pow(textCenterX - fieldCenterX, 2) + 
+                Math.pow(textCenterY - fieldCenterY, 2)
+            );
+            
+            return distance < 100;
+        });
+        
+        const valueText = nearbyTexts.find(text => {
+            const textStr = text.text.trim();
+            return /\d/.test(textStr) || textStr.length > 2;
+        });
+        
+        return valueText ? valueText.text : null;
     }
 
     /**
@@ -463,38 +470,39 @@ Respond in JSON format:
     }
 
     /**
-     * Step 3: Use Gemini to select which OCR texts belong to each detected field
+     * Step 3: Use Gemini to select which OCR texts belong to each detected field (with distance-based masking)
      */
     async selectOCRTextsWithGemini(imagePath, ocrTexts, detectedFields) {
         try {
-            console.log('Using Gemini to select OCR texts for detected fields...');
+            console.log('Using Gemini to select OCR texts for detected fields with distance-based masking...');
             
-            // Read and encode the image
+            // Rate limiting
+            const timeSinceLastCall = Date.now() - this.lastGeminiCall;
+            if (timeSinceLastCall < this.minTimeBetweenCalls) {
+                await this.delay(this.minTimeBetweenCalls - timeSinceLastCall);
+            }
+            
             const imageBuffer = fs.readFileSync(imagePath);
             const imageBase64 = imageBuffer.toString('base64');
             
-            // Create comprehensive prompt for OCR text selection
             const prompt = `You are an expert at analyzing OCR results from product packaging. I have:
 
-1. DETECTED FIELDS from previous analysis:
-${detectedFields.map(field => `   - Field: ${field.fieldName} | Complete Text: "${field.completeText}"`).join('\n')}
+1. DETECTED FIELDS with distance analysis from previous step:
+${detectedFields.map(field => `   - Field: ${field.fieldName} | Text to Mask: "${field.textToMask}" | Strategy: ${field.maskingStrategy} | Distance: ${field.distance}`).join('\n')}
 
 2. ALL OCR TEXTS from the image:
 ${ocrTexts.map(text => `   ID: ${text.id} | Text: "${text.text}"`).join('\n')}
 
-YOUR TASK: For each detected field, identify which OCR text IDs should be selected to form that complete field.
+YOUR TASK: For each detected field, identify which OCR text IDs should be selected based on the masking strategy:
 
-IMPORTANT RULES:
-- A field might be one OCR text (e.g., ID: 5 contains "Mfg.Date:11/2024")
-- A field might be multiple OCR texts (e.g., ID: 5="Mfg.Date:", ID: 6="11/2024")
-- Select ALL OCR texts that belong to each field, even if they're separated
-- If a field spans multiple lines, select all relevant texts
-- Be precise - only select texts that are actually part of the field
+MASKING RULES:
+- **"both"** strategy (low distance): Select OCR texts for both field name AND value
+- **"value_only"** strategy (high distance): Select OCR texts ONLY for the value part, NOT the field name
 
-EXAMPLE RESPONSES:
-- If "Mfg.Date:11/2024" is one OCR text with ID 5: select [5]
-- If "Mfg.Date:" is ID 5 and "11/2024" is ID 6: select [5, 6]
-- If "Mfg.", "Date:", "11/2024" are IDs 5, 6, 7: select [5, 6, 7]
+IMPORTANT:
+- For "both" strategy: Select all OCR texts that form the complete field-value pair
+- For "value_only" strategy: Select only OCR texts that contain the value, avoid field name texts
+- Be precise - only select texts that match the intended masking strategy
 
 Respond in JSON format:
 {
@@ -504,15 +512,19 @@ Respond in JSON format:
       "fieldType": "manufacturing_date",
       "fieldName": "Mfg.Date",
       "completeText": "Mfg.Date:11/2024",
+      "maskingStrategy": "both",
+      "textToMask": "Mfg.Date:11/2024",
       "selectedOCRIds": [5, 6],
-      "reasoning": "Field name 'Mfg.Date:' is in OCR ID 5, value '11/2024' is in OCR ID 6"
+      "reasoning": "Both strategy - selecting field name (ID 5) and value (ID 6)"
     },
     {
-      "fieldType": "batch_number", 
-      "fieldName": "Batch No.",
-      "completeText": "Batch No.:A333001",
+      "fieldType": "expiry_date",
+      "fieldName": "EXP DATE",
+      "completeText": "EXP DATE 01/2026",
+      "maskingStrategy": "value_only",
+      "textToMask": "01/2026",
       "selectedOCRIds": [8],
-      "reasoning": "Complete field-value pair is contained in single OCR text ID 8"
+      "reasoning": "Value only strategy - selecting only the value part (ID 8), keeping field name"
     }
   ],
   "totalSelectedTexts": 3,
@@ -530,16 +542,16 @@ Respond in JSON format:
             const response = await result.response;
             const text = response.text();
             
+            this.lastGeminiCall = Date.now();
+            
             console.log('Gemini OCR selection raw response:', text);
             
-            // Parse JSON response
             try {
                 const jsonMatch = text.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
                     const parsedResult = JSON.parse(jsonMatch[0]);
                     
                     if (parsedResult.success && parsedResult.selectedFields && parsedResult.selectedFields.length > 0) {
-                        // Validate and enrich the selection with actual OCR data
                         const enrichedSelection = this.enrichGeminiSelection(parsedResult, ocrTexts);
                         console.log('✅ Gemini successfully selected OCR texts for fields');
                         return enrichedSelection;
@@ -549,33 +561,25 @@ Respond in JSON format:
                 console.warn('Could not parse Gemini JSON response for OCR selection');
             }
             
-            // Fallback: create basic selection based on field detection
             const fallbackSelection = this.createFallbackOCRSelection(detectedFields, ocrTexts);
             return fallbackSelection;
             
         } catch (error) {
             console.error('Error in Gemini OCR text selection:', error);
-            return {
-                success: false,
-                selectedFields: [],
-                totalSelectedTexts: 0,
-                confidence: "low",
-                error: error.message
-            };
+            return this.createFallbackOCRSelection(detectedFields, ocrTexts);
         }
     }
 
     /**
-     * Step 4: Create mask based on Gemini's OCR text selection
+     * Step 4: Create mask based on Gemini's OCR text selection (with distance-based masking)
      */
     async createMaskFromGeminiSelection(imagePath, selectedFields, padding = 5) {
         try {
-            console.log('Creating mask from Gemini OCR selection...');
+            console.log('Creating mask from Gemini OCR selection with distance-based masking...');
             
             const imageMetadata = await sharp(imagePath).metadata();
             const { width, height } = imageMetadata;
             
-            // Start with black background
             let maskBuffer = await sharp({
                 create: {
                     width: width,
@@ -587,7 +591,6 @@ Respond in JSON format:
             
             const compositeOps = [];
             
-            // Create white rectangle for each selected field
             for (const field of selectedFields) {
                 const coordinates = field.combinedCoordinates;
                 
@@ -602,7 +605,8 @@ Respond in JSON format:
                 const maskWidth = maxX - minX;
                 const maskHeight = maxY - minY;
                 
-                console.log(`Creating mask for ${field.fieldName}: ${maskWidth}x${maskHeight} at (${minX}, ${minY})`);
+                const strategy = field.maskingStrategy || 'both';
+                console.log(`Creating mask for ${field.fieldName} (${strategy} strategy): ${maskWidth}x${maskHeight} at (${minX}, ${minY})`);
                 
                 const whiteRect = await sharp({
                     create: {
@@ -621,20 +625,19 @@ Respond in JSON format:
                 });
             }
             
-            // Apply all masks
             const finalMaskBuffer = await sharp(maskBuffer)
                 .composite(compositeOps)
                 .png()
                 .toBuffer();
             
-            const maskPath = imagePath.replace(path.extname(imagePath), '_gemini_selection_mask.png');
+            const maskPath = imagePath.replace(path.extname(imagePath), '_distance_based_mask.png');
             fs.writeFileSync(maskPath, finalMaskBuffer);
             
-            console.log(`Gemini selection mask saved to: ${maskPath}`);
+            console.log(`Distance-based mask saved to: ${maskPath}`);
             return maskPath;
             
         } catch (error) {
-            console.error('Error creating mask from Gemini selection:', error);
+            console.error('Error creating distance-based mask from Gemini selection:', error);
             throw error;
         }
     }
@@ -647,16 +650,15 @@ Respond in JSON format:
             console.log('Creating highlight from Gemini OCR selection...');
             
             const colors = [
-                { r: 255, g: 0, b: 0, alpha: 0.4 },     // Red
-                { r: 0, g: 255, b: 0, alpha: 0.4 },     // Green  
-                { r: 0, g: 0, b: 255, alpha: 0.4 },     // Blue
-                { r: 255, g: 255, b: 0, alpha: 0.4 }    // Yellow
+                { r: 255, g: 0, b: 0, alpha: 0.4 },
+                { r: 0, g: 255, b: 0, alpha: 0.4 },
+                { r: 0, g: 0, b: 255, alpha: 0.4 },
+                { r: 255, g: 255, b: 0, alpha: 0.4 }
             ];
             
             let imageProcessor = sharp(imagePath);
             const compositeOps = [];
             
-            // Create colored overlay for each selected field
             for (let i = 0; i < selectedFields.length; i++) {
                 const field = selectedFields[i];
                 const color = colors[i % colors.length];
@@ -714,7 +716,7 @@ Respond in JSON format:
      */
     async inpaintImage(imagePath, maskPath, prompt = "remove complete text fields, clean background matching surrounding area") {
         try {
-            console.log('Starting inpainting process with Imagen 3 Capability model (4 samples)...');
+            console.log('Starting inpainting process with Imagen 3 (4 samples) - FINAL STEP...');
             
             const authClient = await this.auth.getClient();
             const tokenResponse = await authClient.getAccessToken();
@@ -726,13 +728,10 @@ Respond in JSON format:
             const imageBase64 = imageBuffer.toString('base64');
             const maskBase64 = maskBuffer.toString('base64');
             
-            // Use the imagen-3.0-capability-001 model endpoint
             const apiUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${this.projectId}/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict`;
             
-            // Enhanced prompt for complete field removal
             const enhancedPrompt = `${prompt}. Remove text completely and fill with clean background that matches the surrounding packaging material. Do not generate new text, numbers, or characters. Fill the masked area with the same background texture and color as the surrounding area.`;
             
-            // API structure with reference images - manual masking only, 4 samples
             const requestBody = {
                 instances: [{
                     prompt: enhancedPrompt,
@@ -765,7 +764,7 @@ Respond in JSON format:
                 }
             };
             
-            console.log('Sending request to Imagen 3 Capability API for 4 samples...');
+            console.log('Sending request to Imagen 3 API for 4 samples...');
             
             const response = await axios.post(apiUrl, requestBody, {
                 headers: {
@@ -781,11 +780,9 @@ Respond in JSON format:
                 
                 console.log(`Processing ${predictions.length} predictions...`);
                 
-                // Process each prediction and save as separate files
                 for (let i = 0; i < predictions.length; i++) {
                     const prediction = predictions[i];
                     
-                    // Handle different response formats
                     let generatedImageBase64;
                     if (prediction.bytesBase64Encoded) {
                         generatedImageBase64 = prediction.bytesBase64Encoded;
@@ -800,7 +797,6 @@ Respond in JSON format:
                     
                     const generatedImageBuffer = Buffer.from(generatedImageBase64, 'base64');
                     
-                    // Create unique filename for each sample
                     const outputPath = imagePath.replace(
                         path.extname(imagePath), 
                         `_inpainted_sample_${i + 1}.png`
@@ -809,14 +805,14 @@ Respond in JSON format:
                     fs.writeFileSync(outputPath, generatedImageBuffer);
                     outputPaths.push(outputPath);
                     
-                    console.log(`Inpainted sample ${i + 1} saved to: ${outputPath}`);
+                    console.log(`✅ Inpainted sample ${i + 1} saved to: ${outputPath}`);
                 }
                 
                 if (outputPaths.length === 0) {
                     throw new Error('No valid images were generated from the predictions');
                 }
                 
-                console.log(`Successfully generated ${outputPaths.length} inpainted variations`);
+                console.log(`🎉 Successfully generated ${outputPaths.length} inpainted variations - WORKFLOW COMPLETE!`);
                 return outputPaths;
                 
             } else {
@@ -854,10 +850,8 @@ Respond in JSON format:
             for (const line of lines) {
                 const upperLine = line.toUpperCase();
                 
-                // Check if line contains any variation of this field
                 for (const variation of variations) {
                     if (upperLine.includes(variation)) {
-                        // Try to extract the complete field-value pair
                         const fieldPatterns = [
                             new RegExp(`${variation.replace(/\./g, '\\.')}\\s*:?\\s*[^\\n]*`, 'i'),
                             new RegExp(`${variation.replace(/\./g, '\\.')}[:\\s]+[^\\s][^\\n]*`, 'i')
@@ -915,7 +909,6 @@ Respond in JSON format:
             const selectedTexts = [];
             const coordinates = [];
             
-            // Get actual OCR texts based on Gemini's selection
             for (const ocrId of field.selectedOCRIds) {
                 const ocrText = ocrTexts.find(text => text.id === ocrId);
                 if (ocrText) {
@@ -956,12 +949,10 @@ Respond in JSON format:
         const fallbackFields = [];
         
         for (const field of detectedFields) {
-            // Simple text matching as fallback
             const matchingTexts = ocrTexts.filter(ocrText => {
                 const fieldWords = field.completeText.toLowerCase().split(/\s+/);
                 const ocrWords = ocrText.text.toLowerCase().split(/\s+/);
                 
-                // Check if OCR text contains any words from the field
                 return fieldWords.some(word => ocrWords.some(ocrWord => 
                     ocrWord.includes(word) || word.includes(ocrWord)
                 ));
@@ -1064,7 +1055,6 @@ Respond in JSON format:
         filePaths.forEach(filePath => {
             try {
                 if (fs.existsSync(filePath)) {
-                    // Check if filename contains 'inpainted' - if so, preserve it
                     const filename = path.basename(filePath).toLowerCase();
                     if (filename.includes('inpainted')) {
                         console.log(`Preserving inpainted file: ${filePath}`);
@@ -1081,5 +1071,4 @@ Respond in JSON format:
     }
 }
 
-// Export singleton instance
 module.exports = new StreamlinedOCRInpaintingService();
