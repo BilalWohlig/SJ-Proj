@@ -1,14 +1,15 @@
 const vision = require('@google-cloud/vision');
 const { GoogleAuth } = require('google-auth-library');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { Storage } = require('@google-cloud/storage');
 const axios = require('axios');
 const fs = require('fs');
 const sharp = require('sharp');
 const path = require('path');
 
 /**
- * Streamlined OCR Inpainting Service with Gemini OCR Selection
- * Workflow: Gemini Field Detection → OCR → Gemini OCR Selection → Mask → Inpaint
+ * Enhanced OCR Inpainting Service with Private GCS Support
+ * Complete workflow: Download -> Process -> Upload all in processImageWithAutoFieldDetection
  */
 class StreamlinedOCRInpaintingService {
     constructor() {
@@ -23,6 +24,17 @@ class StreamlinedOCRInpaintingService {
         if (!this.geminiApiKey) {
             console.warn('Gemini API key not configured. Set GEMINI_API_KEY environment variable.');
         }
+
+        // Initialize Google Cloud Storage with private bucket support
+        this.storage = new Storage({
+            projectId: this.projectId,
+            keyFilename: this.keyFilePath,
+            // Enable private bucket access
+            scopes: ['https://www.googleapis.com/auth/cloud-platform']
+        });
+
+        this.inputBucket = process.env.GCS_INPUT_BUCKET || 'default-input-bucket';
+        this.outputBucket = process.env.GCS_OUTPUT_BUCKET || 'default-output-bucket';
 
         this.visionClient = new vision.ImageAnnotatorClient({
             keyFilename: this.keyFilePath
@@ -70,50 +82,199 @@ class StreamlinedOCRInpaintingService {
     }
 
     /**
-     * MAIN WORKFLOW: Process image with Gemini OCR text selection
+     * Download file from private GCS bucket
      */
-    async processImageWithAutoFieldDetection(imagePath, inpaintPrompt = "clean background, seamless removal", padding = 5, createHighlight = true) {
+    async downloadFromPrivateGCS(bucketName, fileName) {
         try {
-            console.log('=== Starting Gemini OCR Selection workflow ===');
+            const bucket = this.storage.bucket(bucketName);
+            const tempDir = './temp/gcs-downloads';
+            
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+            }
+
+            const localPath = path.join(tempDir, `gcs_${Date.now()}_${fileName}`);
+            
+            console.log(`Downloading ${fileName} from private GCS bucket ${bucketName}...`);
+            
+            // Check if file exists before downloading
+            const file = bucket.file(fileName);
+            const [exists] = await file.exists();
+            
+            if (!exists) {
+                throw new Error(`File ${fileName} does not exist in bucket ${bucketName}`);
+            }
+            
+            // Download file with proper authentication for private buckets
+            await file.download({
+                destination: localPath,
+                validation: 'crc32c' // Enable integrity checking
+            });
+
+            console.log(`✅ Downloaded ${fileName} from private bucket to ${localPath}`);
+            return localPath;
+        } catch (error) {
+            console.error(`Error downloading ${fileName} from private GCS bucket:`, error);
+            if (error.code === 404) {
+                throw new Error(`File ${fileName} not found in bucket ${bucketName}`);
+            } else if (error.code === 403) {
+                throw new Error(`Access denied to bucket ${bucketName}. Check service account permissions for private buckets.`);
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Upload file to private GCS bucket with proper naming
+     */
+    async uploadToPrivateGCS(localPath, fileName, bucketName) {
+        try {
+            const bucket = this.storage.bucket(bucketName);
+            
+            console.log(`Uploading ${fileName} to private GCS bucket ${bucketName}...`);
+            
+            // Upload with proper metadata for private buckets
+            const [file] = await bucket.upload(localPath, {
+                destination: fileName,
+                metadata: {
+                    cacheControl: 'no-cache', // Disable cache for private buckets
+                    metadata: {
+                        uploadedAt: new Date().toISOString(),
+                        processedBy: 'ocr-inpainting-service',
+                        bucketType: 'private'
+                    }
+                },
+                // Enable resumable uploads for larger files
+                resumable: true,
+                validation: 'crc32c' // Enable integrity checking
+            });
+
+            const gcsUrl = `gs://${bucketName}/${fileName}`;
+            console.log(`✅ Uploaded ${fileName} to private bucket: ${gcsUrl}`);
+            return gcsUrl;
+        } catch (error) {
+            console.error(`Error uploading ${fileName} to private GCS bucket:`, error);
+            if (error.code === 403) {
+                throw new Error(`Access denied to bucket ${bucketName}. Check service account permissions for private buckets.`);
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Generate signed URL for private bucket access (optional)
+     */
+    async generateSignedUrl(bucketName, fileName, expiresInMinutes = 60) {
+        try {
+            const bucket = this.storage.bucket(bucketName);
+            const file = bucket.file(fileName);
+            
+            const [url] = await file.getSignedUrl({
+                version: 'v4',
+                action: 'read',
+                expires: Date.now() + expiresInMinutes * 60 * 1000
+            });
+            
+            return url;
+        } catch (error) {
+            console.error(`Error generating signed URL for ${fileName}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * MAIN CONSOLIDATED WORKFLOW: Complete GCS OCR Inpainting Pipeline
+     * This function handles everything: Download -> Process -> Upload
+     */
+    async processImageWithAutoFieldDetection(inputFileName, options = {}) {
+        const {
+            inpaintPrompt = "clean background, seamless removal",
+            padding = 5,
+            returnOriginal = false,
+            returnMask = false,
+            returnHighlighted = false
+        } = options;
+
+        let tempFiles = [];
+        
+        try {
+            console.log('=== Starting Complete GCS OCR Inpainting Workflow ===');
             const startTime = Date.now();
             
-            // Step 1: Use Gemini to detect fields with retry logic
-            const geminiFieldDetection = await this.autoDetectStandardFields(imagePath);
-            console.log('Step 1 - Gemini field detection result:', geminiFieldDetection);
+            // STEP 1: Download image from private input GCS bucket
+            console.log(`Step 1: Downloading from private bucket ${this.inputBucket}/${inputFileName}`);
+            const localImagePath = await this.downloadFromPrivateGCS(this.inputBucket, inputFileName);
+            tempFiles.push(localImagePath);
+            
+            // STEP 2: Validate downloaded image
+            console.log('Step 2: Validating downloaded image');
+            const validation = await this.validateImage(localImagePath);
+            if (!validation.valid) {
+                throw new Error(`Invalid image: ${validation.error}`);
+            }
+            
+            // STEP 3: Use Gemini to detect fields with retry logic
+            console.log('Step 3: Gemini field detection');
+            const geminiFieldDetection = await this.autoDetectStandardFields(localImagePath);
+            console.log('Gemini field detection result:', geminiFieldDetection);
             
             if (!geminiFieldDetection.found || !geminiFieldDetection.autoDetectedFields || geminiFieldDetection.autoDetectedFields.length === 0) {
                 throw new Error('No standard fields found in the image');
             }
 
-            // Step 2: Perform OCR to get all text with coordinates
-            const ocrResults = await this.getFullOCRResults(imagePath);
-            console.log('Step 2 - OCR detected texts:', ocrResults.individualTexts.length);
+            // STEP 4: Perform OCR to get all text with coordinates
+            console.log('Step 4: Google Vision OCR');
+            const ocrResults = await this.getFullOCRResults(localImagePath);
+            console.log(`OCR detected ${ocrResults.individualTexts.length} text elements`);
             
-            // Step 3: Use Gemini to select which OCR texts belong to each field
+            // STEP 5: Use Gemini to select which OCR texts belong to each field
+            console.log('Step 5: Gemini OCR text selection');
             const geminiOCRSelection = await this.selectOCRTextsWithGemini(
-                imagePath, 
+                localImagePath, 
                 ocrResults.individualTexts, 
                 geminiFieldDetection.autoDetectedFields
             );
-            console.log('Step 3 - Gemini OCR selection result:', geminiOCRSelection);
+            console.log('Gemini OCR selection result:', geminiOCRSelection);
 
             if (!geminiOCRSelection.success || geminiOCRSelection.selectedFields.length === 0) {
                 throw new Error('Gemini could not select appropriate OCR texts for the detected fields');
             }
 
-            // Step 4: Create mask based on Gemini's OCR text selection
-            const maskPath = await this.createMaskFromGeminiSelection(imagePath, geminiOCRSelection.selectedFields, padding);
+            // STEP 6: Create mask based on Gemini's OCR text selection
+            console.log('Step 6: Creating mask from Gemini selection');
+            const maskPath = await this.createMaskFromGeminiSelection(localImagePath, geminiOCRSelection.selectedFields, padding);
+            tempFiles.push(maskPath);
             
-            // Step 5: Create highlighted image (optional)
+            // STEP 7: Create highlighted image (optional)
             let highlightedPath = null;
-            if (createHighlight) {
-                highlightedPath = await this.createHighlightFromGeminiSelection(imagePath, geminiOCRSelection.selectedFields, padding);
-            }
+            console.log('Step 7: Creating highlighted image');
+            highlightedPath = await this.createHighlightFromGeminiSelection(localImagePath, geminiOCRSelection.selectedFields, padding);
+            tempFiles.push(highlightedPath);
             
-            // Step 6: Inpaint with 4 samples (FINAL STEP)
-            const inpaintedPaths = await this.inpaintImage(imagePath, maskPath, inpaintPrompt);
+            // STEP 8: Inpaint with 4 samples
+            console.log('Step 8: Imagen 3 inpainting (4 samples)');
+            const inpaintedPaths = await this.inpaintImage(localImagePath, maskPath, inpaintPrompt);
+            tempFiles.push(...inpaintedPaths);
             
-            // Prepare response
+            // STEP 9: Upload all results to private output GCS bucket
+            console.log('Step 9: Uploading results to private output bucket');
+            const gcsResults = await this.uploadAllResultsToGCS(
+                inputFileName,
+                {
+                    originalImage: localImagePath,
+                    maskImage: maskPath,
+                    highlightedImage: highlightedPath,
+                    inpaintedImages: inpaintedPaths
+                },
+                this.outputBucket,
+                {
+                    returnOriginal,
+                    returnMask,
+                    returnHighlighted
+                }
+            );
+            
+            // STEP 10: Prepare final response
             const foundTextResults = {
                 autoDetectedFields: geminiFieldDetection.autoDetectedFields.map(field => ({
                     fieldType: field.fieldType,
@@ -122,7 +283,9 @@ class StreamlinedOCRInpaintingService {
                     fieldPart: field.fieldPart,
                     valuePart: field.valuePart,
                     context: field.context,
-                    confidence: field.confidence
+                    confidence: field.confidence,
+                    maskingStrategy: field.maskingStrategy,
+                    distance: field.distance
                 })),
                 foundFields: geminiFieldDetection.autoDetectedFields,
                 geminiOCRSelection: geminiOCRSelection,
@@ -131,8 +294,11 @@ class StreamlinedOCRInpaintingService {
                 maskingType: "gemini_selected_areas"
             };
             
+            const endTime = Date.now();
+            const processingTime = `${(endTime - startTime) / 1000}s`;
+            
             const results = {
-                originalImage: imagePath,
+                originalImage: localImagePath,
                 foundText: foundTextResults,
                 autoDetectedFields: geminiFieldDetection.autoDetectedFields,
                 geminiAnalysis: geminiFieldDetection,
@@ -140,27 +306,130 @@ class StreamlinedOCRInpaintingService {
                 maskImage: maskPath,
                 highlightedImage: highlightedPath,
                 inpaintedImages: inpaintedPaths,
-                method: "gemini_ocr_selection_4_samples"
+                gcsResults: gcsResults,
+                method: "complete_gcs_workflow_4_samples",
+                processingTime: processingTime,
+                workflowSteps: [
+                    'gcs_download',
+                    'image_validation',
+                    'gemini_field_detection',
+                    'google_vision_ocr',
+                    'gemini_ocr_selection',
+                    'mask_creation',
+                    'highlight_creation',
+                    'imagen_inpainting',
+                    'gcs_upload'
+                ],
+                buckets: {
+                    input: this.inputBucket,
+                    output: this.outputBucket,
+                    bucketType: 'private'
+                }
             };
             
-            const endTime = Date.now();
-            const processingTime = `${(endTime - startTime) / 1000}s`;
-            results.processingTime = processingTime;
-            
-            console.log(`=== Gemini OCR Selection workflow completed successfully ===`);
+            console.log(`=== Complete GCS OCR Inpainting Workflow Completed Successfully ===`);
+            console.log(`Input: ${this.inputBucket}/${inputFileName}`);
             console.log(`Auto-detected ${geminiFieldDetection.autoDetectedFields.length} fields with distance analysis`);
             console.log(`Distance analysis results:`);
             geminiFieldDetection.autoDetectedFields.forEach(field => {
                 console.log(`  - ${field.fieldName}: ${field.distance} distance, ${field.maskingStrategy} strategy`);
             });
             console.log(`Selected ${geminiOCRSelection.totalSelectedTexts} OCR texts for masking`);
-            console.log(`Generated ${inpaintedPaths.length} inpainted variations`);
-            console.log(`Workflow completed in ${processingTime}`);
+            console.log(`Generated and uploaded ${gcsResults.outputFiles.filter(f => f.type === 'inpainted').length} inpainted variations`);
+            console.log(`Total files uploaded to ${this.outputBucket}: ${gcsResults.outputFiles.length}`);
+            console.log(`Complete workflow time: ${processingTime}`);
             
             return results;
             
         } catch (error) {
-            console.error('Error in Gemini OCR Selection workflow:', error);
+            console.error('Error in complete GCS OCR workflow:', error);
+            throw error;
+        } finally {
+            // Clean up temporary files after a delay
+            setTimeout(() => {
+                this.cleanupFiles(tempFiles);
+            }, 10000); // 10 second delay to ensure all operations complete
+        }
+    }
+
+    /**
+     * Upload all processed results to GCS with proper naming convention
+     */
+    async uploadAllResultsToGCS(inputFileName, processedFiles, outputBucket, options = {}) {
+        const { returnOriginal = false, returnMask = false, returnHighlighted = true } = options;
+        
+        const outputFiles = [];
+        const gcsUrls = [];
+        
+        // Get base filename without extension
+        const baseName = path.parse(inputFileName).name;
+        const baseExt = path.parse(inputFileName).ext;
+        
+        try {
+            // Upload original image if requested
+            if (returnOriginal && processedFiles.originalImage) {
+                const originalFileName = `${baseName}_original${baseExt}`;
+                const originalUrl = await this.uploadToPrivateGCS(processedFiles.originalImage, originalFileName, outputBucket);
+                outputFiles.push({
+                    type: 'original',
+                    fileName: originalFileName,
+                    gcsUrl: originalUrl
+                });
+                gcsUrls.push(originalUrl);
+            }
+
+            // Upload mask image if requested
+            if (returnMask && processedFiles.maskImage) {
+                const maskFileName = `${baseName}_mask.png`;
+                const maskUrl = await this.uploadToPrivateGCS(processedFiles.maskImage, maskFileName, outputBucket);
+                outputFiles.push({
+                    type: 'mask',
+                    fileName: maskFileName,
+                    gcsUrl: maskUrl
+                });
+                gcsUrls.push(maskUrl);
+            }
+
+            // Upload highlighted image if requested
+            if (returnHighlighted && processedFiles.highlightedImage) {
+                const highlightFileName = `${baseName}_highlighted.png`;
+                const highlightUrl = await this.uploadToPrivateGCS(processedFiles.highlightedImage, highlightFileName, outputBucket);
+                outputFiles.push({
+                    type: 'highlighted',
+                    fileName: highlightFileName,
+                    gcsUrl: highlightUrl
+                });
+                gcsUrls.push(highlightUrl);
+            }
+
+            // Upload all inpainted images (4 samples) with naming convention: filename_1.png, filename_2.png, etc.
+            if (processedFiles.inpaintedImages && Array.isArray(processedFiles.inpaintedImages)) {
+                for (let i = 0; i < processedFiles.inpaintedImages.length; i++) {
+                    const inpaintedImagePath = processedFiles.inpaintedImages[i];
+                    const inpaintedFileName = `${baseName}_${i + 1}.png`;
+                    const inpaintedUrl = await this.uploadToPrivateGCS(inpaintedImagePath, inpaintedFileName, outputBucket);
+                    
+                    outputFiles.push({
+                        type: 'inpainted',
+                        fileName: inpaintedFileName,
+                        gcsUrl: inpaintedUrl,
+                        sampleNumber: i + 1
+                    });
+                    gcsUrls.push(inpaintedUrl);
+                }
+            }
+
+            console.log(`✅ Uploaded ${outputFiles.length} processed files to private GCS bucket ${outputBucket}`);
+            
+            return {
+                outputFiles,
+                gcsUrls,
+                uploadCount: outputFiles.length,
+                bucketType: 'private'
+            };
+            
+        } catch (error) {
+            console.error('Error uploading processed images to private GCS:', error);
             throw error;
         }
     }
@@ -195,14 +464,16 @@ class StreamlinedOCRInpaintingService {
 
 CRITICAL DISTANCE ANALYSIS: For each field found, analyze the visual distance between the field name and its value:
 
-- **LOW DISTANCE** (field and value are directly connected/adjacent with no gap): Both field name AND value should be masked for inpainting
+- **LOW DISTANCE** (field and value are directly connected/adjacent with no gap OR field is above its correspnding value with no gap): Both field name AND value should be masked for inpainting
 - **HIGH DISTANCE** (field and value are separated by significant spacing or in different columns): Only the VALUE should be masked for inpainting, keep the field name
 
 Examples of LOW DISTANCE (mask both field and value):
-- "B.No.SXG0306A" (field and value directly connected)
-- "MFG.Dt.02/2025" (field and value connected with dots)
-- "EXP.Dt.07/2026" (field and value connected directly)
-- "M.R.P.₹95.00" (field and value connected with symbol)
+- "B.No.SXG0306A" (field and value directly connected with no gap)
+- "MFG.Dt.02/2025" (field and value connected with dots with no gap)
+- "EXP.Dt.07/2026" (field and value connected directly with no gap)
+- "M.R.P.₹95.00" (field and value connected with symbol with no gap)
+- "MFG    (field is above its corresponding value with no gap) 
+ 02/2024"
 
 Examples of HIGH DISTANCE (mask only value):
 - "Mfg. Lic. No." in left column and "G/25/2150" in right column (separated by significant space)
@@ -356,7 +627,7 @@ Respond in JSON format:
                             const isConnected = completeText.includes(variation) && !completeText.includes(' : ') && !completeText.includes('  ');
                             const distance = isConnected ? 'low' : 'high';
                             const maskingStrategy = distance === 'low' ? 'both' : 'value_only';
-                            const textToMask = maskingStrategy === 'both' ? completeText : valuePart;
+                            const textToMask = maskingStrategy === 'both' ? completeText : fieldValue;
                             
                             detectedFields.push({
                                 fieldType: fieldType,
@@ -365,6 +636,7 @@ Respond in JSON format:
                                 fieldPart: ocrText.text,
                                 valuePart: fieldValue || '',
                                 distance: distance,
+                                distanceReason: `OCR fallback analysis - ${distance} distance detected`,
                                 maskingStrategy: maskingStrategy,
                                 textToMask: textToMask,
                                 textToKeep: maskingStrategy === 'value_only' ? ocrText.text : '',
@@ -474,7 +746,7 @@ Respond in JSON format:
      */
     async selectOCRTextsWithGemini(imagePath, ocrTexts, detectedFields) {
         try {
-            console.log('Using Gemini to select OCR texts for detected fields with distance-based masking...');
+            console.log('Using Gemini to select OCR texts for detected fields with visual context, distance-based masking, and OCR error handling...');
             
             // Rate limiting
             const timeSinceLastCall = Date.now() - this.lastGeminiCall;
@@ -485,24 +757,73 @@ Respond in JSON format:
             const imageBuffer = fs.readFileSync(imagePath);
             const imageBase64 = imageBuffer.toString('base64');
             
-            const prompt = `You are an expert at analyzing OCR results from product packaging. I have:
+            const prompt = `You are an expert at analyzing OCR results from product packaging. I'm providing you with the ACTUAL IMAGE and OCR data to help you make accurate field-to-value associations, especially when OCR has errors or incomplete text detection.
+
+VISUAL CONTEXT: Look at the image to understand the layout, spacing, and visual relationships between text elements.
 
 1. DETECTED FIELDS with distance analysis from previous step:
-${detectedFields.map(field => `   - Field: ${field.fieldName} | Text to Mask: "${field.textToMask}" | Strategy: ${field.maskingStrategy} | Distance: ${field.distance}`).join('\n')}
+${detectedFields.map(field => `   - Field: ${field.fieldName} | Text to Mask: "${field.textToMask}" | Strategy: ${field.maskingStrategy} | Distance: ${field.distance} | Reason: ${field.distanceReason}`).join('\n')}
 
-2. ALL OCR TEXTS from the image:
+2. ALL OCR TEXTS from the image with their IDs:
 ${ocrTexts.map(text => `   ID: ${text.id} | Text: "${text.text}"`).join('\n')}
 
-YOUR TASK: For each detected field, identify which OCR text IDs should be selected based on the masking strategy:
+YOUR TASK: 
+1. **VISUALLY EXAMINE** the image to see the actual layout and positioning of text elements
+2. **MATCH** each detected field with its corresponding OCR text IDs based on visual proximity and logical association
+3. **HANDLE OCR ERRORS** using intelligent proximity-based reconstruction
+4. **APPLY** the correct masking strategy based on the distance analysis from step 1
 
-MASKING RULES:
-- **"both"** strategy (low distance): Select OCR texts for both field name AND value
-- **"value_only"** strategy (high distance): Select OCR texts ONLY for the value part, NOT the field name
+ENHANCED MASKING RULES:
+- **"both"** strategy (low distance): Select OCR texts for both field name AND value when they are visually connected
+- **"value_only"** strategy (high distance): Select OCR texts ONLY for the value part when field and value are visually separated
 
-IMPORTANT:
-- For "both" strategy: Select all OCR texts that form the complete field-value pair
-- For "value_only" strategy: Select only OCR texts that contain the value, avoid field name texts
-- Be precise - only select texts that match the intended masking strategy
+VISUAL ANALYSIS INSTRUCTIONS:
+- Look at the spatial relationships between text elements in the image
+- Identify which OCR text IDs correspond to field names vs. values
+- Consider text alignment, proximity, and logical grouping
+- Use the visual context to resolve ambiguities in OCR text matching
+
+**CRITICAL: OCR ERROR HANDLING AND PROXIMITY-BASED RECONSTRUCTION**
+
+OCR systems often make errors or fail to detect complete text. When this happens, use intelligent analysis:
+
+**SCENARIO: Incomplete Value Detection**
+- If you expect a date like "03/2024" but only find "03" in OCR text
+- Look for nearby OCR texts that could be the missing parts ("/" and "2024")
+- Check OCR texts positioned close to "03" for potential matches
+
+**RECONSTRUCTION RULES:**
+1. **Missing Separators**: If expecting "03/2024" but find "03" and "2024" separately, select both IDs
+2. **Split Dates**: Common patterns like "MM/YYYY", "DD-MM-YY", "MM.YYYY" may be split across multiple OCR texts
+3. **Fragmented Text**: "MFG.DATE:03/2024" might be detected as ["MFG.DATE", ":", "03", "/", "2024"] - select all relevant parts
+4. **Proximity Logic**: If "03" is detected, look for nearby numbers that could form a date (like "2024", "24", "04", etc.)
+5. **Pattern Matching**: Use visual positioning to identify logical groupings (dates, batch numbers, prices)
+
+**INTELLIGENT PROXIMITY ANALYSIS:**
+- **Horizontal Proximity**: Check OCR texts in the same horizontal line or very close vertically
+- **Visual Grouping**: Look for texts that appear visually grouped together in the image
+- **Logical Completion**: If you see "03" near field "MFG DATE", look for year components nearby
+- **Missing Characters**: OCR might miss ".", "/", "-", ":" - look for numbers that could complete the pattern
+
+**EXAMPLES OF OCR ERROR SCENARIOS:**
+
+1. **Expected**: "03/2024" | **OCR Found**: ["03", "2024"] | **Action**: Select both IDs
+2. **Expected**: "MFG.DT:03/2024" | **OCR Found**: ["MFG.DT", "03", "2024"] | **Action**: Select all three IDs
+3. **Expected**: "B.NO.ABC123" | **OCR Found**: ["B.NO", "ABC", "123"] | **Action**: Select all three IDs
+4. **Expected**: "₹95.00" | **OCR Found**: ["₹", "95", "00"] | **Action**: Select all three IDs
+5. **Expected**: "EXP:12-2025" | **OCR Found**: ["EXP", "12", "2025"] | **Action**: Based on strategy - if "both", select all; if "value_only", select ["12", "2025"]
+
+**ADVANCED PATTERN RECOGNITION:**
+- **Dates**: Look for number combinations that form valid dates (MM/YY, MM/YYYY, DD/MM/YY)
+- **Batch Numbers**: Alphanumeric combinations near "BATCH", "LOT", "B.NO"
+- **Prices**: Number combinations near "MRP", "PRICE", currency symbols
+- **Codes**: Letter-number combinations that appear to be product codes
+
+IMPORTANT MATCHING CRITERIA:
+- For "both" strategy: Find ALL OCR texts that form the complete field-value pair, even if fragmented
+- For "value_only" strategy: Find ALL value-related OCR texts, reconstructing from fragments if needed
+- Use visual positioning and logical patterns to group fragmented text
+- When in doubt, include nearby OCR texts that could logically belong to the field value
 
 Respond in JSON format:
 {
@@ -511,24 +832,31 @@ Respond in JSON format:
     {
       "fieldType": "manufacturing_date",
       "fieldName": "Mfg.Date",
-      "completeText": "Mfg.Date:11/2024",
+      "completeText": "Mfg.Date:03/2024",
       "maskingStrategy": "both",
-      "textToMask": "Mfg.Date:11/2024",
-      "selectedOCRIds": [5, 6],
-      "reasoning": "Both strategy - selecting field name (ID 5) and value (ID 6)"
+      "textToMask": "Mfg.Date:03/2024",
+      "selectedOCRIds": [5, 6, 7, 8],
+      "reasoning": "Both strategy - field and value are connected. Reconstructed complete date from fragments",
+      "visualAnalysis": "Field 'Mfg.Date' followed by fragments '03', '/', '2024' in close proximity",
+      "ocrReconstruction": "Combined OCR fragments: 'Mfg.Date' (ID 5) + '03' (ID 6) + '/' (ID 7) + '2024' (ID 8) to form complete date"
     },
     {
-      "fieldType": "expiry_date",
-      "fieldName": "EXP DATE",
-      "completeText": "EXP DATE 01/2026",
+      "fieldType": "batch_number",
+      "fieldName": "B.NO",
+      "completeText": "B.NO ABC123",
       "maskingStrategy": "value_only",
-      "textToMask": "01/2026",
-      "selectedOCRIds": [8],
-      "reasoning": "Value only strategy - selecting only the value part (ID 8), keeping field name"
+      "textToMask": "ABC123",
+      "selectedOCRIds": [12, 13],
+      "reasoning": "Value only strategy - reconstructed batch number from nearby fragments",
+      "visualAnalysis": "Field 'B.NO' in left column, value fragments 'ABC' and '123' in right column",
+      "ocrReconstruction": "Combined nearby OCR texts 'ABC' (ID 12) + '123' (ID 13) to form complete batch number"
     }
   ],
-  "totalSelectedTexts": 3,
-  "confidence": "high"
+  "totalSelectedTexts": 6,
+  "confidence": "high",
+  "visualContextUsed": true,
+  "ocrErrorHandling": true,
+  "reconstructedFields": 2
 }`;
 
             const imagePart = {
@@ -544,7 +872,7 @@ Respond in JSON format:
             
             this.lastGeminiCall = Date.now();
             
-            console.log('Gemini OCR selection raw response:', text);
+            console.log('Gemini OCR selection with visual context and OCR error handling - raw response:', text);
             
             try {
                 const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -553,19 +881,31 @@ Respond in JSON format:
                     
                     if (parsedResult.success && parsedResult.selectedFields && parsedResult.selectedFields.length > 0) {
                         const enrichedSelection = this.enrichGeminiSelection(parsedResult, ocrTexts);
-                        console.log('✅ Gemini successfully selected OCR texts for fields');
+                        console.log('✅ Gemini successfully selected OCR texts using visual context and OCR error handling');
+                        console.log(`Visual analysis confidence: ${parsedResult.confidence}`);
+                        console.log(`OCR error handling enabled: ${parsedResult.ocrErrorHandling}`);
+                        console.log(`Reconstructed fields: ${parsedResult.reconstructedFields || 0}`);
+                        console.log(`Selected fields with enhanced analysis: ${parsedResult.selectedFields.length}`);
+                        
+                        // Log OCR reconstruction details
+                        parsedResult.selectedFields.forEach(field => {
+                            if (field.ocrReconstruction) {
+                                console.log(`📝 OCR Reconstruction for ${field.fieldName}: ${field.ocrReconstruction}`);
+                            }
+                        });
+                        
                         return enrichedSelection;
                     }
                 }
             } catch (parseError) {
-                console.warn('Could not parse Gemini JSON response for OCR selection');
+                console.warn('Could not parse Gemini JSON response for OCR selection, using fallback');
             }
             
             const fallbackSelection = this.createFallbackOCRSelection(detectedFields, ocrTexts);
             return fallbackSelection;
             
         } catch (error) {
-            console.error('Error in Gemini OCR text selection:', error);
+            console.error('Error in Gemini OCR text selection with visual context and error handling:', error);
             return this.createFallbackOCRSelection(detectedFields, ocrTexts);
         }
     }
@@ -864,12 +1204,22 @@ Respond in JSON format:
                                 const valuePart = completeText.replace(variation, '').replace(/^[:\s]+/, '');
                                 
                                 if (valuePart) {
+                                    // Default fallback distance analysis
+                                    const isConnected = !completeText.includes('  ') && !completeText.includes(' : ');
+                                    const distance = isConnected ? 'low' : 'high';
+                                    const maskingStrategy = distance === 'low' ? 'both' : 'value_only';
+                                    
                                     autoDetectedFields.push({
                                         fieldType: fieldType,
                                         fieldName: variation,
                                         completeText: completeText,
                                         fieldPart: variation,
                                         valuePart: valuePart,
+                                        distance: distance,
+                                        distanceReason: `Fallback analysis - ${distance} distance detected`,
+                                        maskingStrategy: maskingStrategy,
+                                        textToMask: maskingStrategy === 'both' ? completeText : valuePart,
+                                        textToKeep: maskingStrategy === 'value_only' ? variation : '',
                                         context: "Extracted from text response",
                                         confidence: "medium"
                                     });
@@ -922,6 +1272,7 @@ Respond in JSON format:
                     fieldType: field.fieldType,
                     fieldName: field.fieldName,
                     completeText: field.completeText,
+                    maskingStrategy: field.maskingStrategy,
                     selectedOCRIds: field.selectedOCRIds,
                     selectedTexts: selectedTexts,
                     combinedCoordinates: this.combineCoordinates(selectedTexts.map(t => t.coordinates)),
@@ -963,6 +1314,7 @@ Respond in JSON format:
                     fieldType: field.fieldType,
                     fieldName: field.fieldName,
                     completeText: field.completeText,
+                    maskingStrategy: field.maskingStrategy || 'both',
                     selectedOCRIds: matchingTexts.map(t => t.id),
                     selectedTexts: matchingTexts,
                     combinedCoordinates: this.combineCoordinates(matchingTexts.map(t => t.coordinates)),
@@ -1019,6 +1371,15 @@ Respond in JSON format:
                 throw new Error(`Unsupported image format: ${metadata.format}`);
             }
 
+            // Check image size constraints
+            if (metadata.width > 10000 || metadata.height > 10000) {
+                throw new Error('Image dimensions too large. Maximum 10000x10000 pixels.');
+            }
+
+            if (metadata.width < 50 || metadata.height < 50) {
+                throw new Error('Image dimensions too small. Minimum 50x50 pixels.');
+            }
+
             return {
                 valid: true,
                 format: metadata.format,
@@ -1055,17 +1416,11 @@ Respond in JSON format:
         filePaths.forEach(filePath => {
             try {
                 if (fs.existsSync(filePath)) {
-                    const filename = path.basename(filePath).toLowerCase();
-                    if (filename.includes('inpainted')) {
-                        console.log(`Preserving inpainted file: ${filePath}`);
-                        return;
-                    }
-                    
                     fs.unlinkSync(filePath);
-                    console.log(`Cleaned up file: ${filePath}`);
+                    console.log(`Cleaned up temp file: ${filePath}`);
                 }
             } catch (error) {
-                console.error(`Error cleaning up file ${filePath}:`, error.message);
+                console.error(`Error cleaning up temp file ${filePath}:`, error.message);
             }
         });
     }

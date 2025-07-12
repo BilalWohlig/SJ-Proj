@@ -1,152 +1,91 @@
 const express = require('express');
 const router = express.Router();
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const __constants = require('../../config/constants');
 const OCRInpaintingService = require('../../services/ocr/OCRInpaintingService');
 const validationOfAPI = require('../../middlewares/validation');
 
 /**
- * @namespace -OCR-Inpainting-
- * @description API related to OCR text detection and inpainting operations with automatic field detection.
+ * @namespace -OCR-Inpainting-GCS-
+ * @description API for OCR text detection and inpainting operations with GCS integration.
  */
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = './uploads/ocr-images';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const timestamp = Date.now();
-    const ext = path.extname(file.originalname);
-    cb(null, `ocr-${timestamp}${ext}`);
-  }
-});
-
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-  },
-  fileFilter: function (req, file, cb) {
-    const allowedMimes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only JPEG, PNG, and WEBP are allowed.'));
-    }
-  }
-});
-
 /**
- * @memberof -OCR-Inpainting-
- * @name processImage
- * @path {POST} /api/ocr/processImage
- * @description Complete workflow to process an image: Auto-detect standard fields -> OCR -> Create mask -> Inpaint (4 samples) -> Return processed images
- * @body {file} image - Image file to process (required)
+ * @memberof -OCR-Inpainting-GCS-
+ * @name processImageFromGCS
+ * @path {POST} /api/ocr/processImageFromGCS
+ * @description Complete GCS workflow: Download from input bucket -> OCR -> Inpaint -> Upload to output bucket
+ * @body {string} inputFileName - Name of the image file in the input GCS bucket (required)
+ * @body {string} inputBucket - Name of the input GCS bucket (required)
+ * @body {string} outputBucket - Name of the output GCS bucket (required)
  * @body {string} inpaintPrompt - Custom prompt for inpainting (optional)
  * @body {number} padding - Extra padding around text for mask (optional, default: 5)
- * @body {boolean} returnOriginal - Whether to include original image in response (optional, default: false)
- * @body {boolean} returnMask - Whether to include mask image in response (optional, default: false)
- * @body {boolean} returnHighlighted - Whether to include highlighted image in response (optional, default: true)
- * @response {string} ContentType=application/json - Response content type with image data
- * @response {string} metadata.msg=Success - Images processed successfully
- * @response {object} metadata.data - Processing results with base64 encoded images and metadata (includes 4 inpainted samples)
- * @code {200} If the msg is 'Success', returns processed images and metadata
+ * @body {boolean} returnOriginal - Whether to include original image in output bucket (optional, default: false)
+ * @body {boolean} returnMask - Whether to include mask image in output bucket (optional, default: false)
+ * @body {boolean} returnHighlighted - Whether to include highlighted image in output bucket (optional, default: true)
+ * @response {string} ContentType=application/json - Response with GCS URLs and processing metadata
+ * @code {200} If successful, returns GCS URLs and processing results
  * @code {400} If validation fails or required parameters are missing
+ * @code {404} If input file not found in GCS bucket
  * @code {500} If there is a server error during processing
- * *** Last-Updated :- 10th July 2025 ***
+ * *** Last-Updated :- 11th July 2025 ***
  */
 
 const validationSchema = {
   type: 'object',
-  required: [], // Only image file is required
+  required: ['inputFileName'],
+  // properties: {
+  //   inputFileName: { type: 'string', minLength: 1 },
+  //   inputBucket: { type: 'string', minLength: 1 },
+  //   outputBucket: { type: 'string', minLength: 1 },
+  //   inpaintPrompt: { type: 'string' },
+  //   padding: { type: 'number', minimum: 0, maximum: 50 },
+  //   returnOriginal: { type: 'boolean' },
+  //   returnMask: { type: 'boolean' },
+  //   returnHighlighted: { type: 'boolean' }
+  // }
 };
 
 const validation = (req, res, next) => {
   return validationOfAPI(req, res, next, validationSchema, 'body');
 };
 
-router.post('/processImage', upload.single('image'), validation, async (req, res) => {
-  let tempFiles = [];
-  
+router.post('/processImageFromGCS', validation, async (req, res) => {
   try {
-    // Check if image file was uploaded
-    if (!req.file) {
-      return res.sendJson({
-        type: __constants.RESPONSE_MESSAGES.BAD_REQUEST,
-        err: 'Image file is required'
-      });
-    }
-
     const {
+      inputFileName,
       inpaintPrompt = 'clean background, seamless text removal',
       padding = 5,
       returnOriginal = false,
       returnMask = false,
-      returnHighlighted = true
+      returnHighlighted = false
     } = req.body;
 
-    const imagePath = req.file.path;
-    tempFiles.push(imagePath);
+    console.log(`Starting GCS OCR inpainting workflow:`);
+    console.log(`- Input: ${inputFileName}`);
+    // console.log(`- Output: ${outputBucket}`);
+    console.log(`- Auto-detecting standard fields: Manufacturing Date, Expiry Date, Batch Number, MRP`);
+    console.log(`- Will generate 4 inpainted samples with automatic field detection`);
 
-    console.log(`Processing OCR inpainting for image: ${imagePath}`);
-    console.log(`Auto-detecting standard fields: Manufacturing Date, Expiry Date, Batch Number, MRP`);
-    console.log(`Will generate 4 inpainted samples with automatic field detection`);
-
-    // Validate the uploaded image
-    const validation = await OCRInpaintingService.validateImage(imagePath);
-    if (!validation.valid) {
-      return res.sendJson({
-        type: __constants.RESPONSE_MESSAGES.BAD_REQUEST,
-        err: `Invalid image: ${validation.error}`
-      });
-    }
-
-    // Process the image using OCR and inpainting with automatic field detection
+    // Call the service function with all parameters
     const results = await OCRInpaintingService.processImageWithAutoFieldDetection(
-      imagePath,
-      inpaintPrompt,
-      parseInt(padding),
-      true // createHighlight = true (always create highlighted image)
+      inputFileName,
+      {
+        inpaintPrompt,
+        padding: parseInt(padding),
+        returnOriginal,
+        returnMask,
+        returnHighlighted
+      }
     );
 
-    // Add generated files to cleanup list
-    if (results.maskImage) tempFiles.push(results.maskImage);
-    if (results.highlightedImage) tempFiles.push(results.highlightedImage);
-    
-    // Add all inpainted images to cleanup list (they are preserved by cleanupFiles method)
-    if (results.inpaintedImages && Array.isArray(results.inpaintedImages)) {
-      tempFiles.push(...results.inpaintedImages);
-    }
-
-    // Process all 4 inpainted images
-    const processedImages = [];
-    if (results.inpaintedImages && Array.isArray(results.inpaintedImages)) {
-      for (let i = 0; i < results.inpaintedImages.length; i++) {
-        const inpaintedImagePath = results.inpaintedImages[i];
-        const inpaintedImageBuffer = fs.readFileSync(inpaintedImagePath);
-        const inpaintedImageBase64 = inpaintedImageBuffer.toString('base64');
-        
-        processedImages.push({
-          data: inpaintedImageBase64,
-          mimeType: 'image/png',
-          filename: path.basename(inpaintedImagePath),
-          size: inpaintedImageBuffer.length,
-          sampleNumber: i + 1
-        });
-      }
-    }
-
-    // Prepare response data with all 4 inpainted samples
+    // Prepare response data
     const responseData = {
-      processedImages: processedImages, // Array of 4 inpainted samples
-      samplesCount: processedImages.length,
+      inputFile: {
+        fileName: inputFileName
+      },
+      outputFiles: results.gcsResults.outputFiles,
+      gcsUrls: results.gcsResults.gcsUrls,
+      samplesCount: results.gcsResults.outputFiles.filter(f => f.type === 'inpainted').length,
       searchMode: 'auto_field_detection',
       autoDetectedFields: results.autoDetectedFields || [],
       foundFields: results.foundText?.foundFields || [],
@@ -157,62 +96,27 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
         method: results.method,
         autoFieldDetection: true,
         detectedFieldsCount: results.foundText?.foundFields?.length || 0,
-        workflowSteps: [
+        workflowSteps: results.workflowSteps || [
+          'gcs_download',
           'gemini_field_detection',
           'google_vision_ocr',
           'gemini_ocr_selection',
           'mask_creation',
           'highlight_creation',
-          'imagen_inpainting'
+          'imagen_inpainting',
+          'gcs_upload'
         ]
-      },
-      originalImage: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        size: req.file.size,
-        dimensions: {
-          width: validation.width,
-          height: validation.height
-        }
       },
       metadata: {
         processedAt: new Date().toISOString(),
         success: true,
-        note: `Auto-detected standard fields - ${results.foundText?.foundFields?.length || 0} fields found and processed with 4 inpainted samples`,
-        workflowComplete: true
+        note: `Auto-detected ${results.foundText?.foundFields?.length || 0} fields and generated ${results.gcsResults.outputFiles.filter(f => f.type === 'inpainted').length} inpainted variations`,
+        workflowComplete: true,
+        bucketAccess: 'private'
       }
     };
 
-    // Optionally include original image
-    if (returnOriginal) {
-      const originalImageBuffer = fs.readFileSync(imagePath);
-      responseData.originalImage.data = originalImageBuffer.toString('base64');
-      responseData.originalImage.mimeType = req.file.mimetype;
-    }
-
-    // Optionally include mask image
-    if (returnMask && results.maskImage) {
-      const maskImageBuffer = fs.readFileSync(results.maskImage);
-      responseData.maskImage = {
-        data: maskImageBuffer.toString('base64'),
-        mimeType: 'image/png',
-        filename: path.basename(results.maskImage),
-        size: maskImageBuffer.length
-      };
-    }
-
-    // Include highlighted image (default behavior)
-    if (returnHighlighted && results.highlightedImage) {
-      const highlightedImageBuffer = fs.readFileSync(results.highlightedImage);
-      responseData.highlightedImage = {
-        data: highlightedImageBuffer.toString('base64'),
-        mimeType: 'image/png',
-        filename: path.basename(results.highlightedImage),
-        size: highlightedImageBuffer.length
-      };
-    }
-
-    // Include Gemini analysis results
+    // Include analysis results if available
     if (results.geminiAnalysis) {
       responseData.geminiAnalysis = {
         found: results.geminiAnalysis.found,
@@ -222,7 +126,6 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       };
     }
 
-    // Include Gemini OCR selection results
     if (results.geminiOCRSelection) {
       responseData.geminiOCRSelection = {
         success: results.geminiOCRSelection.success,
@@ -239,13 +142,19 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     });
 
   } catch (err) {
-    console.error('Error in OCR inpainting process:', err);
+    console.error('Error in GCS OCR inpainting process:', err);
     
     // Determine error type and message
     let errorType = __constants.RESPONSE_MESSAGES.SERVER_ERROR;
     let errorMessage = err.message || err;
 
-    if (err.message?.includes('No standard fields found')) {
+    if (err.code === 404 || err.message?.includes('not found') || err.message?.includes('does not exist')) {
+      errorType = __constants.RESPONSE_MESSAGES.NOT_FOUND;
+      errorMessage = `Input file not found in GCS bucket: ${req.body.inputBucket}/${req.body.inputFileName}`;
+    } else if (err.code === 403 || err.message?.includes('access denied') || err.message?.includes('permission')) {
+      errorType = __constants.RESPONSE_MESSAGES.FORBIDDEN;
+      errorMessage = `Access denied to GCS bucket. Check service account permissions for private buckets.`;
+    } else if (err.message?.includes('No standard fields found')) {
       errorType = __constants.RESPONSE_MESSAGES.NOT_FOUND;
       errorMessage = 'No standard fields (Manufacturing Date, Expiry Date, Batch Number, MRP) were found in the image';
     } else if (err.message?.includes('Invalid') || err.message?.includes('validation')) {
@@ -253,6 +162,9 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
     } else if (err.message?.includes('API') || err.message?.includes('quota')) {
       errorType = __constants.RESPONSE_MESSAGES.SERVICE_UNAVAILABLE;
       errorMessage = 'External service temporarily unavailable. Please try again later.';
+    } else if (err.message?.includes('bucket') || err.message?.includes('storage')) {
+      errorType = __constants.RESPONSE_MESSAGES.BAD_REQUEST;
+      errorMessage = `GCS bucket error: ${err.message}`;
     }
 
     res.sendJson({
@@ -261,16 +173,15 @@ router.post('/processImage', upload.single('image'), validation, async (req, res
       metadata: {
         processedAt: new Date().toISOString(),
         success: false,
-        note: "Auto field detection failed",
+        note: "GCS OCR inpainting workflow failed",
         searchMode: 'auto_field_detection',
-        workflowComplete: false
+        workflowComplete: false,
+        bucketAccess: 'private',
+        inputFile: req.body.inputFileName ? {
+          fileName: req.body.inputFileName
+        } : null
       }
     });
-  } finally {
-    // Clean up temporary files after a delay to ensure response is sent
-    // setTimeout(() => {
-    //   OCRInpaintingService.cleanupFiles(tempFiles);
-    // }, 5000); // 5 second delay
   }
 });
 
