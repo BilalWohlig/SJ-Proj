@@ -6,14 +6,14 @@ const validationOfAPI = require('../../middlewares/validation');
 
 /**
  * @namespace -OCR-Inpainting-GCS-
- * @description API for OCR text detection and inpainting operations with GCS integration.
+ * @description API for OCR text detection and inpainting operations with GCS integration and detail restoration.
  */
 
 /**
  * @memberof -OCR-Inpainting-GCS-
  * @name processImageFromGCS
  * @path {POST} /api/ocr/processImageFromGCS
- * @description Complete GCS workflow: Download from input bucket -> OCR -> Inpaint -> Upload to output bucket
+ * @description Complete GCS workflow: Download from input bucket -> OCR -> Inpaint -> Upload to output bucket with detail restoration
  * @body {string} inputFileName - Name of the image file in the input GCS bucket (required)
  * @body {string} inputBucket - Name of the input GCS bucket (required)
  * @body {string} outputBucket - Name of the output GCS bucket (required)
@@ -22,6 +22,10 @@ const validationOfAPI = require('../../middlewares/validation');
  * @body {boolean} returnOriginal - Whether to include original image in output bucket (optional, default: false)
  * @body {boolean} returnMask - Whether to include mask image in output bucket (optional, default: false)
  * @body {boolean} returnHighlighted - Whether to include highlighted image in output bucket (optional, default: true)
+ * @body {string} maskChannel - Channel to use for mask processing ('red', 'green', 'blue', 'alpha', 'auto') (optional, default: 'red')
+ * @body {number} detailFeatherRadius - Feathering radius for detail restoration (optional, default: 1)
+ * @body {boolean} skipDetailRestoration - Skip detail restoration step (optional, default: false)
+ * @body {boolean} returnRawInpainted - Return raw inpainted images without detail restoration (optional, default: false)
  * @response {string} ContentType=application/json - Response with GCS URLs and processing metadata
  * @code {200} If successful, returns GCS URLs and processing results
  * @code {400} If validation fails or required parameters are missing
@@ -33,16 +37,18 @@ const validationOfAPI = require('../../middlewares/validation');
 const validationSchema = {
   type: 'object',
   required: ['inputFileName'],
-  // properties: {
-  //   inputFileName: { type: 'string', minLength: 1 },
-  //   inputBucket: { type: 'string', minLength: 1 },
-  //   outputBucket: { type: 'string', minLength: 1 },
-  //   inpaintPrompt: { type: 'string' },
-  //   padding: { type: 'number', minimum: 0, maximum: 50 },
-  //   returnOriginal: { type: 'boolean' },
-  //   returnMask: { type: 'boolean' },
-  //   returnHighlighted: { type: 'boolean' }
-  // }
+  properties: {
+    inputFileName: { type: 'string', minLength: 1 },
+    inpaintPrompt: { type: 'string' },
+    padding: { type: 'number', minimum: 0, maximum: 50 },
+    returnOriginal: { type: 'boolean' },
+    returnMask: { type: 'boolean' },
+    returnHighlighted: { type: 'boolean' },
+    maskChannel: { type: 'string', enum: ['red', 'green', 'blue', 'alpha', 'auto'] },
+    detailFeatherRadius: { type: 'number', minimum: 0, maximum: 10 },
+    skipDetailRestoration: { type: 'boolean' },
+    returnRawInpainted: { type: 'boolean' }
+  }
 };
 
 const validation = (req, res, next) => {
@@ -57,15 +63,21 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
       padding = 5,
       returnOriginal = false,
       returnMask = false,
-      returnHighlighted = false
+      returnHighlighted = false,
+      maskChannel = 'red',
+      detailFeatherRadius = 1,
+      skipDetailRestoration = false,
+      returnRawInpainted = false
     } = req.body;
 
-    console.log(`Starting GCS OCR inpainting workflow:`);
+    console.log(`Starting GCS OCR inpainting workflow with detail restoration:`);
     console.log(`- Input: ${inputFileName}`);
     console.log(`- Auto-detecting enhanced fields: Manufacturing Date, Expiry Date, Batch Number, MRP, Pack Size, Inclusive of All Taxes (IOAT only if low distance)`);
     console.log(`- Including Hindi text detection for all fields`);
     console.log(`- Using unified distance-based masking strategy (pack size always included, IOAT only if low distance)`);
     console.log(`- Will generate 4 inpainted samples with automatic field detection`);
+    console.log(`- Detail restoration: ${skipDetailRestoration ? 'DISABLED' : 'ENABLED'} (maskChannel: ${maskChannel}, featherRadius: ${detailFeatherRadius})`);
+    console.log(`- Text distortion prevention: ${skipDetailRestoration ? 'DISABLED' : 'ENABLED'}`);
 
     // Call the service function with all parameters
     const results = await OCRInpaintingService.processImageWithAutoFieldDetection(
@@ -75,7 +87,11 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
         padding: parseInt(padding),
         returnOriginal,
         returnMask,
-        returnHighlighted
+        returnHighlighted,
+        maskChannel,
+        detailFeatherRadius: parseFloat(detailFeatherRadius),
+        skipDetailRestoration,
+        returnRawInpainted
       }
     );
 
@@ -87,6 +103,7 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
       outputFiles: results.gcsResults.outputFiles,
       gcsUrls: results.gcsResults.gcsUrls,
       samplesCount: results.gcsResults.outputFiles.filter(f => f.type === 'inpainted').length,
+      rawSamplesCount: results.gcsResults.outputFiles.filter(f => f.type === 'raw_inpainted').length,
       searchMode: 'enhanced_unified_distance_field_detection',
       autoDetectedFields: results.autoDetectedFields || [],
       foundFields: results.foundText?.foundFields || [],
@@ -108,8 +125,17 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
           'distance_based_mask_creation',
           'highlight_creation',
           'imagen_inpainting',
+          ...(skipDetailRestoration ? [] : ['detail_restoration']),
           'gcs_upload'
         ]
+      },
+      detailRestoration: {
+        enabled: !skipDetailRestoration,
+        maskChannel: maskChannel,
+        featherRadius: parseFloat(detailFeatherRadius),
+        textDistortionPrevention: !skipDetailRestoration,
+        pixelLevelBlending: !skipDetailRestoration,
+        method: skipDetailRestoration ? 'none' : 'pixel_level_blending'
       },
       distanceAnalysis: {
         unifiedMaskingStrategy: results.geminiAnalysis?.unifiedMaskingStrategy || 'values_only',
@@ -171,16 +197,18 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
       metadata: {
         processedAt: new Date().toISOString(),
         success: true,
-        note: `Enhanced unified distance-based detection: ${results.foundText?.foundFields?.length || 0} fields found, ${results.geminiOCRSelection?.totalSelectedTexts || 0} OCR texts selected for masking (IOAT only if low distance), ${results.gcsResults.outputFiles.filter(f => f.type === 'inpainted').length} inpainted variations generated`,
+        note: `Enhanced unified distance-based detection with ${skipDetailRestoration ? 'standard' : 'detail-preserved'} inpainting: ${results.foundText?.foundFields?.length || 0} fields found, ${results.geminiOCRSelection?.totalSelectedTexts || 0} OCR texts selected for masking (IOAT only if low distance), ${results.gcsResults.outputFiles.filter(f => f.type === 'inpainted').length} ${skipDetailRestoration ? 'standard' : 'detail-preserved'} variations generated`,
         workflowComplete: true,
         bucketAccess: 'private',
+        textDistortionPrevented: !skipDetailRestoration,
         enhancedFeatures: [
           'hindi_text_detection',
           'pack_size_detection',
           'inclusive_of_taxes_detection',
           'unified_distance_based_masking',
           'visual_context_analysis',
-          'ocr_error_handling'
+          'ocr_error_handling',
+          ...(skipDetailRestoration ? [] : ['detail_restoration', 'text_distortion_prevention', 'pixel_level_blending'])
         ]
       }
     };
@@ -246,6 +274,9 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
     } else if (err.message?.includes('Gemini')) {
       errorType = __constants.RESPONSE_MESSAGES.SERVICE_UNAVAILABLE;
       errorMessage = 'AI analysis service temporarily unavailable. Please try again later.';
+    } else if (err.message?.includes('detail restoration') || err.message?.includes('pixel blend')) {
+      errorType = __constants.RESPONSE_MESSAGES.SERVER_ERROR;
+      errorMessage = 'Detail restoration failed. Try setting skipDetailRestoration=true for standard inpainting.';
     }
 
     res.sendJson({
@@ -254,17 +285,21 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
       metadata: {
         processedAt: new Date().toISOString(),
         success: false,
-        note: "Enhanced unified distance-based GCS OCR inpainting workflow failed (IOAT only selected if low distance detected)",
+        note: "Enhanced unified distance-based GCS OCR inpainting workflow with detail restoration failed (IOAT only selected if low distance detected)",
         searchMode: 'enhanced_unified_distance_field_detection',
         workflowComplete: false,
         bucketAccess: 'private',
+        textDistortionPrevented: false,
         enhancedFeatures: [
           'hindi_text_detection',
           'pack_size_detection',
           'inclusive_of_taxes_detection',
           'unified_distance_based_masking',
           'visual_context_analysis',
-          'ocr_error_handling'
+          'ocr_error_handling',
+          'detail_restoration_option',
+          'text_distortion_prevention_option',
+          'pixel_level_blending_option'
         ],
         inputFile: req.body.inputFileName ? {
           fileName: req.body.inputFileName
@@ -286,6 +321,21 @@ router.post('/processImageFromGCS', validation, async (req, res) => {
           highDistance: 'Field and value separated - mask only VALUES + pack size values (NO IOAT)',
           packSizeHandling: 'Always included in masking regardless of distance',
           ioatHandling: 'Only included when LOW distance is detected'
+        },
+        detailRestoration: {
+          purpose: 'Prevents text distortion outside masked areas',
+          method: 'Pixel-level blending with channel-based mask processing',
+          maskChannels: ['red', 'green', 'blue', 'alpha', 'auto'],
+          featheringRange: '0-10 pixels',
+          canBeDisabled: 'Set skipDetailRestoration=true'
+        },
+        troubleshooting: {
+          commonIssues: [
+            'If text appears distorted outside mask areas, ensure detail restoration is enabled (skipDetailRestoration=false)',
+            'If mask is not working properly, try different maskChannel values (red/green/blue/alpha/auto)',
+            'For edge blending issues, adjust detailFeatherRadius (0-10)',
+            'Check image quality and ensure clear text for better OCR results'
+          ]
         }
       }
     });

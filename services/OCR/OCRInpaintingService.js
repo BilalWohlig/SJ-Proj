@@ -8,7 +8,7 @@ const sharp = require('sharp');
 const path = require('path');
 
 /**
- * Enhanced OCR Inpainting Service with Private GCS Support
+ * Enhanced OCR Inpainting Service with Private GCS Support and Detail Restoration
  * Complete workflow: Download -> Process -> Upload all in processImageWithAutoFieldDetection
  */
 class StreamlinedOCRInpaintingService {
@@ -198,7 +198,7 @@ class StreamlinedOCRInpaintingService {
     }
 
     /**
-     * MAIN CONSOLIDATED WORKFLOW: Complete GCS OCR Inpainting Pipeline
+     * MAIN CONSOLIDATED WORKFLOW: Complete GCS OCR Inpainting Pipeline with Detail Restoration
      * This function handles everything: Download -> Process -> Upload
      */
     async processImageWithAutoFieldDetection(inputFileName, options = {}) {
@@ -207,13 +207,17 @@ class StreamlinedOCRInpaintingService {
             padding = 5,
             returnOriginal = false,
             returnMask = false,
-            returnHighlighted = false
+            returnHighlighted = false,
+            maskChannel = 'red',
+            detailFeatherRadius = 1,
+            skipDetailRestoration = false,
+            returnRawInpainted = false
         } = options;
 
         let tempFiles = [];
         
         try {
-            console.log('=== Starting Complete GCS OCR Inpainting Workflow ===');
+            console.log('=== Starting Complete GCS OCR Inpainting Workflow with Detail Restoration ===');
             const startTime = Date.now();
             
             // STEP 1: Download image from private input GCS bucket
@@ -271,6 +275,23 @@ class StreamlinedOCRInpaintingService {
             const inpaintedPaths = await this.inpaintImage(localImagePath, maskPath, inpaintPrompt);
             tempFiles.push(...inpaintedPaths);
             
+            // STEP 8.5: Restore original details outside mask (prevent text distortion)
+            let finalImagePaths = inpaintedPaths;
+            if (!skipDetailRestoration) {
+                console.log('Step 8.5: Restoring original details to prevent text distortion');
+                const detailRestoredPaths = await this.restoreDetailsWithPixelBlend(
+                    localImagePath,
+                    inpaintedPaths,
+                    maskPath,
+                    {
+                        maskChannel: maskChannel,
+                        featherRadius: detailFeatherRadius
+                    }
+                );
+                tempFiles.push(...detailRestoredPaths);
+                finalImagePaths = detailRestoredPaths;
+            }
+            
             // STEP 9: Upload all results to private output GCS bucket
             console.log('Step 9: Uploading results to private output bucket');
             const gcsResults = await this.uploadAllResultsToGCS(
@@ -279,13 +300,15 @@ class StreamlinedOCRInpaintingService {
                     originalImage: localImagePath,
                     maskImage: maskPath,
                     highlightedImage: highlightedPath,
-                    inpaintedImages: inpaintedPaths
+                    inpaintedImages: finalImagePaths,
+                    rawInpaintedImages: returnRawInpainted ? inpaintedPaths : null
                 },
                 this.outputBucket,
                 {
                     returnOriginal,
                     returnMask,
-                    returnHighlighted
+                    returnHighlighted,
+                    returnRawInpainted
                 }
             );
             
@@ -323,10 +346,17 @@ class StreamlinedOCRInpaintingService {
                 geminiOCRSelection: geminiOCRSelection,
                 maskImage: maskPath,
                 highlightedImage: highlightedPath,
-                inpaintedImages: inpaintedPaths,
+                inpaintedImages: finalImagePaths,
+                rawInpaintedImages: inpaintedPaths,
                 gcsResults: gcsResults,
-                method: "complete_gcs_workflow_4_samples_distance_based",
+                method: skipDetailRestoration ? "complete_gcs_workflow_4_samples_distance_based" : "complete_gcs_workflow_4_samples_with_detail_restoration",
                 processingTime: processingTime,
+                detailRestoration: {
+                    enabled: !skipDetailRestoration,
+                    maskChannel: maskChannel,
+                    featherRadius: detailFeatherRadius,
+                    method: 'pixel_level_blending'
+                },
                 workflowSteps: [
                     'gcs_download',
                     'image_validation',
@@ -336,6 +366,7 @@ class StreamlinedOCRInpaintingService {
                     'distance_based_mask_creation',
                     'highlight_creation',
                     'imagen_inpainting',
+                    ...(skipDetailRestoration ? [] : ['detail_restoration']),
                     'gcs_upload'
                 ],
                 buckets: {
@@ -354,6 +385,7 @@ class StreamlinedOCRInpaintingService {
             });
             console.log(`Selected ${geminiOCRSelection.totalSelectedTexts} OCR texts for masking`);
             console.log(`Generated and uploaded ${gcsResults.outputFiles.filter(f => f.type === 'inpainted').length} inpainted variations`);
+            console.log(`Detail restoration: ${skipDetailRestoration ? 'Skipped' : 'Applied'}`);
             console.log(`Total files uploaded to ${this.outputBucket}: ${gcsResults.outputFiles.length}`);
             console.log(`Complete workflow time: ${processingTime}`);
             
@@ -374,7 +406,7 @@ class StreamlinedOCRInpaintingService {
      * Upload all processed results to GCS with proper naming convention
      */
     async uploadAllResultsToGCS(inputFileName, processedFiles, outputBucket, options = {}) {
-        const { returnOriginal = false, returnMask = false, returnHighlighted = true } = options;
+        const { returnOriginal = false, returnMask = false, returnHighlighted = true, returnRawInpainted = false } = options;
         
         const outputFiles = [];
         const gcsUrls = [];
@@ -420,7 +452,7 @@ class StreamlinedOCRInpaintingService {
                 gcsUrls.push(highlightUrl);
             }
 
-            // Upload all inpainted images (4 samples) with naming convention: filename_1.png, filename_2.png, etc.
+            // Upload main inpainted images (detail restored if applicable)
             if (processedFiles.inpaintedImages && Array.isArray(processedFiles.inpaintedImages)) {
                 for (let i = 0; i < processedFiles.inpaintedImages.length; i++) {
                     const inpaintedImagePath = processedFiles.inpaintedImages[i];
@@ -434,6 +466,23 @@ class StreamlinedOCRInpaintingService {
                         sampleNumber: i + 1
                     });
                     gcsUrls.push(inpaintedUrl);
+                }
+            }
+
+            // Upload raw inpainted images if requested
+            if (returnRawInpainted && processedFiles.rawInpaintedImages && Array.isArray(processedFiles.rawInpaintedImages)) {
+                for (let i = 0; i < processedFiles.rawInpaintedImages.length; i++) {
+                    const rawInpaintedImagePath = processedFiles.rawInpaintedImages[i];
+                    const rawInpaintedFileName = `${baseName}_raw_${i + 1}.png`;
+                    const rawInpaintedUrl = await this.uploadToPrivateGCS(rawInpaintedImagePath, rawInpaintedFileName, outputBucket);
+                    
+                    outputFiles.push({
+                        type: 'raw_inpainted',
+                        fileName: rawInpaintedFileName,
+                        gcsUrl: rawInpaintedUrl,
+                        sampleNumber: i + 1
+                    });
+                    gcsUrls.push(rawInpaintedUrl);
                 }
             }
 
@@ -1099,6 +1148,275 @@ Respond in JSON format:
                 console.error('API Error Details:', JSON.stringify(error.response.data, null, 2));
             }
             
+            throw error;
+        }
+    }
+
+    /**
+     * DETAIL RESTORATION METHODS
+     */
+
+    /**
+     * Process mask with specific channel extraction (like ComfyUI's channel selection)
+     */
+    async processMaskWithChannel(inputMaskPath, outputPath, targetWidth, targetHeight, channel = 'red') {
+        try {
+            console.log(`Processing mask using ${channel.toUpperCase()} channel...`);
+            
+            const maskMeta = await sharp(inputMaskPath).metadata();
+            console.log(`Original mask channels: ${maskMeta.channels}, hasAlpha: ${maskMeta.hasAlpha}`);
+            
+            let maskProcessor = sharp(inputMaskPath);
+            
+            // Resize first if needed
+            if (maskMeta.width !== targetWidth || maskMeta.height !== targetHeight) {
+                console.log(`Resizing mask: ${maskMeta.width}x${maskMeta.height} → ${targetWidth}x${targetHeight}`);
+                maskProcessor = maskProcessor.resize(targetWidth, targetHeight, {
+                    kernel: sharp.kernel.nearest, // Preserve binary nature
+                    fit: 'fill'
+                });
+            }
+            
+            // Extract the specified channel
+            switch (channel.toLowerCase()) {
+                case 'red':
+                    console.log('Extracting RED channel as mask...');
+                    await maskProcessor
+                        .extractChannel(0) // Red channel
+                        .png()
+                        .toFile(outputPath);
+                    break;
+                    
+                case 'green':
+                    console.log('Extracting GREEN channel as mask...');
+                    await maskProcessor
+                        .extractChannel(1) // Green channel
+                        .png()
+                        .toFile(outputPath);
+                    break;
+                    
+                case 'blue':
+                    console.log('Extracting BLUE channel as mask...');
+                    await maskProcessor
+                        .extractChannel(2) // Blue channel
+                        .png()
+                        .toFile(outputPath);
+                    break;
+                    
+                case 'alpha':
+                    console.log('Extracting ALPHA channel as mask...');
+                    if (maskMeta.hasAlpha) {
+                        await maskProcessor
+                            .extractChannel(maskMeta.channels - 1) // Alpha is typically the last channel
+                            .png()
+                            .toFile(outputPath);
+                    } else {
+                        console.warn('No alpha channel found, falling back to grayscale conversion...');
+                        await maskProcessor
+                            .greyscale()
+                            .png()
+                            .toFile(outputPath);
+                    }
+                    break;
+                    
+                case 'auto':
+                default:
+                    console.log('Auto-detecting best channel for mask...');
+                    
+                    // Try different channels and pick the one with most contrast
+                    const channelStats = [];
+                    
+                    for (let i = 0; i < Math.min(3, maskMeta.channels); i++) {
+                        const tempPath = outputPath.replace('.png', `_temp_channel_${i}.png`);
+                        await sharp(inputMaskPath)
+                            .resize(targetWidth, targetHeight, { kernel: sharp.kernel.nearest, fit: 'fill' })
+                            .extractChannel(i)
+                            .png()
+                            .toFile(tempPath);
+                        
+                        const stats = await sharp(tempPath).stats();
+                        channelStats.push({
+                            channel: i,
+                            contrast: stats.channels[0].max - stats.channels[0].min,
+                            mean: stats.channels[0].mean,
+                            path: tempPath
+                        });
+                    }
+                    
+                    // Pick channel with highest contrast (most likely to be a good mask)
+                    const bestChannel = channelStats.reduce((prev, current) => 
+                        current.contrast > prev.contrast ? current : prev
+                    );
+                    
+                    console.log(`Auto-selected channel ${bestChannel.channel} with contrast ${bestChannel.contrast}`);
+                    
+                    // Copy the best channel result
+                    await sharp(bestChannel.path).png().toFile(outputPath);
+                    
+                    // Clean up temp files
+                    channelStats.forEach(stat => {
+                        if (fs.existsSync(stat.path)) {
+                            fs.unlinkSync(stat.path);
+                        }
+                    });
+                    break;
+            }
+            
+            // Apply threshold to ensure binary mask
+            const finalMaskPath = outputPath.replace('.png', '_binary.png');
+            await sharp(outputPath)
+                .threshold(128) // Convert to pure binary
+                .png()
+                .toFile(finalMaskPath);
+            
+            // Replace original with binary version
+            fs.renameSync(finalMaskPath, outputPath);
+            
+            console.log(`✅ Mask processed using ${channel.toUpperCase()} channel`);
+            
+        } catch (error) {
+            console.error('Error processing mask with channel:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Pixel-level blending for detail restoration
+     */
+    async pixelLevelBlend(originalImagePath, inpaintedImagePath, maskPath, outputPath) {
+        try {
+            console.log('Using pixel-level blending for detail restoration...');
+            
+            // Get raw pixel data
+            const originalBuffer = await sharp(originalImagePath).raw().toBuffer();
+            const inpaintedBuffer = await sharp(inpaintedImagePath).raw().toBuffer();
+            const maskBuffer = await sharp(maskPath).greyscale().raw().toBuffer();
+            
+            const { width, height, channels } = await sharp(originalImagePath).metadata();
+            
+            // Create output buffer
+            const outputBuffer = Buffer.alloc(originalBuffer.length);
+            
+            // Blend pixels based on mask
+            for (let i = 0; i < originalBuffer.length; i += channels) {
+                const maskValue = maskBuffer[Math.floor(i / channels)]; // Grayscale mask value
+                const alpha = maskValue / 255; // Normalize to 0-1
+                
+                // For each channel (R, G, B, A)
+                for (let c = 0; c < channels; c++) {
+                    const originalPixel = originalBuffer[i + c];
+                    const inpaintedPixel = inpaintedBuffer[i + c];
+                    
+                    // Blend: if mask is white (255), use inpainted; if black (0), use original
+                    outputBuffer[i + c] = Math.round(
+                        originalPixel * (1 - alpha) + inpaintedPixel * alpha
+                    );
+                }
+            }
+            
+            // Save blended result
+            await sharp(outputBuffer, {
+                raw: {
+                    width: width,
+                    height: height,
+                    channels: channels
+                }
+            })
+            .png()
+            .toFile(outputPath);
+            
+            console.log('✅ Pixel-level detail restoration completed');
+            
+        } catch (error) {
+            console.error('Error in pixel-level blending:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Restore original details outside mask using pixel-level blending
+     */
+    async restoreDetailsWithPixelBlend(originalImagePath, inpaintedPaths, maskPath, options = {}) {
+        const { maskChannel = 'red', featherRadius = 1 } = options;
+        
+        try {
+            console.log('=== Starting Detail Restoration with Pixel-Level Blending ===');
+            
+            const restoredPaths = [];
+            
+            // Get original image dimensions
+            const originalMeta = await sharp(originalImagePath).metadata();
+            const targetWidth = originalMeta.width;
+            const targetHeight = originalMeta.height;
+            
+            // Process mask with channel extraction
+            const processedMaskPath = maskPath.replace('.png', '_channel_processed.png');
+            await this.processMaskWithChannel(maskPath, processedMaskPath, targetWidth, targetHeight, maskChannel);
+            
+            // Apply feathering if requested
+            let finalMaskPath = processedMaskPath;
+            if (featherRadius > 0) {
+                console.log(`Applying feathering with radius ${featherRadius}...`);
+                finalMaskPath = processedMaskPath.replace('.png', '_feathered.png');
+                await sharp(processedMaskPath)
+                    .blur(featherRadius)
+                    .png()
+                    .toFile(finalMaskPath);
+            }
+            
+            // Process each inpainted image
+            for (let i = 0; i < inpaintedPaths.length; i++) {
+                const inpaintedPath = inpaintedPaths[i];
+                console.log(`Restoring details for inpainted sample ${i + 1}...`);
+                
+                // Ensure inpainted image matches original dimensions
+                const inpaintedMeta = await sharp(inpaintedPath).metadata();
+                let resizedInpaintedPath = inpaintedPath;
+                
+                if (inpaintedMeta.width !== targetWidth || inpaintedMeta.height !== targetHeight) {
+                    console.log(`Resizing inpainted image to match original: ${targetWidth}x${targetHeight}`);
+                    resizedInpaintedPath = inpaintedPath.replace('.png', '_resized.png');
+                    await sharp(inpaintedPath)
+                        .resize(targetWidth, targetHeight, {
+                            kernel: sharp.kernel.lanczos3,
+                            fit: 'fill'
+                        })
+                        .png()
+                        .toFile(resizedInpaintedPath);
+                }
+                
+                // Perform pixel-level blending
+                const restoredPath = inpaintedPath.replace('_inpainted_sample_', '_detail_restored_sample_');
+                await this.pixelLevelBlend(
+                    originalImagePath,
+                    resizedInpaintedPath,
+                    finalMaskPath,
+                    restoredPath
+                );
+                
+                restoredPaths.push(restoredPath);
+                
+                // Clean up resized temp file if created
+                if (resizedInpaintedPath !== inpaintedPath && fs.existsSync(resizedInpaintedPath)) {
+                    fs.unlinkSync(resizedInpaintedPath);
+                }
+                
+                console.log(`✅ Detail restoration completed for sample ${i + 1}`);
+            }
+            
+            // Clean up mask processing temp files
+            if (fs.existsSync(processedMaskPath)) {
+                fs.unlinkSync(processedMaskPath);
+            }
+            if (finalMaskPath !== processedMaskPath && fs.existsSync(finalMaskPath)) {
+                fs.unlinkSync(finalMaskPath);
+            }
+            
+            console.log(`✅ All ${restoredPaths.length} samples processed with detail restoration`);
+            return restoredPaths;
+            
+        } catch (error) {
+            console.error('Error in detail restoration with pixel blend:', error);
             throw error;
         }
     }
