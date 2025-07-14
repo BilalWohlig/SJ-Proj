@@ -49,23 +49,38 @@ class StreamlinedOCRInpaintingService {
         this.genAI = new GoogleGenerativeAI(this.geminiApiKey);
         this.geminiModel = this.genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-        // Define standard fields to auto-detect
+        // Define standard fields to auto-detect with Hindi translations
         this.STANDARD_FIELDS = [
             {
                 fieldType: 'manufacturing_date',
-                commonVariations: ['MFG DATE', 'MFG DT', 'MFG.DATE', 'MFG.DT', 'MFGDATE', 'MANUFACTURING DATE', 'MANUFACTURE DATE', 'MANUFACTURED ON', 'MFD', 'MFG', 'PROD DATE', 'PRODUCTION DATE']
+                commonVariations: ['MFG DATE', 'MFG DT', 'MFG.DATE', 'MFG.DT', 'MFGDATE', 'MANUFACTURING DATE', 'MANUFACTURE DATE', 'MANUFACTURED ON', 'MFD', 'MFG', 'PROD DATE', 'PRODUCTION DATE'],
+                hindiVariations: ['उत्पादन तिथि', 'निर्माण तिथि', 'बनाने की तिथि', 'उत्पादन दिनांक', 'निर्माण दिनांक']
             },
             {
                 fieldType: 'expiry_date',
-                commonVariations: ['EXP DATE', 'EXP DT', 'EXP.DATE', 'EXP.DT', 'EXPDATE', 'EXPIRY DATE', 'EXPIRE DATE', 'EXPIRES ON', 'EXP', 'BEST BEFORE', 'USE BY', 'VALID UNTIL']
+                commonVariations: ['EXP DATE', 'EXP DT', 'EXP.DATE', 'EXP.DT', 'EXPDATE', 'EXPIRY DATE', 'EXPIRE DATE', 'EXPIRES ON', 'EXP', 'BEST BEFORE', 'USE BY', 'VALID UNTIL'],
+                hindiVariations: ['समाप्ति तिथि', 'एक्सपायरी डेट', 'समाप्ति दिनांक', 'उपयोग करने की अंतिम तिथि', 'अवधि समाप्ति']
             },
             {
                 fieldType: 'batch_number',
-                commonVariations: ['BATCH NO', 'BATCH NO.', 'BATCH NUMBER', 'B.NO', 'B.NO.', 'BNO', 'BATCH', 'LOT NO', 'LOT NO.', 'LOT NUMBER', 'LOT', 'BATCH CODE', 'LOT CODE']
+                commonVariations: ['BATCH NO', 'BATCH NO.', 'BATCH NUMBER', 'B.NO', 'B.NO.', 'BNO', 'BATCH', 'LOT NO', 'LOT NO.', 'LOT NUMBER', 'LOT', 'BATCH CODE', 'LOT CODE'],
+                hindiVariations: ['बैच नंबर', 'बैच संख्या', 'लॉट संख्या', 'बैच कोड', 'लॉट नंबर']
             },
             {
                 fieldType: 'mrp',
-                commonVariations: ['MRP', 'M.R.P', 'M.R.P.', 'MAX RETAIL PRICE', 'MAXIMUM RETAIL PRICE', 'RETAIL PRICE', 'PRICE', 'COST', 'RATE']
+                commonVariations: ['MRP', 'M.R.P', 'M.R.P.', 'MAX RETAIL PRICE', 'MAXIMUM RETAIL PRICE', 'RETAIL PRICE', 'PRICE', 'COST', 'RATE'],
+                hindiVariations: ['अधिकतम खुदरा मूल्य', 'एमआरपी', 'खुदरा मूल्य', 'मूल्य', 'कीमत', 'दर']
+            },
+            {
+                fieldType: 'pack_size',
+                commonVariations: ['PACK SIZE', 'PACK', 'SIZE', 'CONTENT', 'CONTENTS', 'NET CONTENT', 'NET CONTENTS', 'NET QTY', 'QUANTITY'],
+                hindiVariations: ['पैक साइज़', 'पैकेट का आकार', 'मात्रा', 'नेट मात्रा', 'कंटेंट'],
+                valuePatterns: ['PER \\d+ TABLETS?', 'PER \\d+ CAPSULES?', 'PER \\d+ PILLS?', '\\d+ TABLETS?', '\\d+ CAPSULES?', '\\d+ PILLS?', '\\d+\\s*ML', '\\d+\\s*MG', '\\d+\\s*GM?', '\\d+\\s*KG', '\\d+\\s*X\\s*\\d+', 'STRIP OF \\d+', 'BOTTLE OF \\d+', 'PACK OF \\d+', 'BOX OF \\d+']
+            },
+            {
+                fieldType: 'inclusive_of_taxes',
+                commonVariations: ['INCLUSIVE OF ALL TAXES', 'INCL OF ALL TAXES', 'INCL. OF ALL TAXES', 'INCLUSIVE OF TAXES', 'INCL OF TAXES', 'INCL. OF TAXES', 'IOAT', 'I.O.A.T', 'I.O.A.T.', 'ALL TAXES INCLUDED', 'TAX INCLUSIVE', 'TAXES INCLUDED'],
+                hindiVariations: ['सभी करों सहित', 'सभी कर शामिल', 'कर सहित', 'टैक्स सहित', 'सभी टैक्स शामिल']
             }
         ];
 
@@ -213,8 +228,8 @@ class StreamlinedOCRInpaintingService {
                 throw new Error(`Invalid image: ${validation.error}`);
             }
             
-            // STEP 3: Use Gemini to detect fields with retry logic
-            console.log('Step 3: Gemini field detection');
+            // STEP 3: Use Gemini to detect fields with distance analysis
+            console.log('Step 3: Gemini field detection with distance analysis');
             const geminiFieldDetection = await this.autoDetectStandardFields(localImagePath);
             console.log('Gemini field detection result:', geminiFieldDetection);
             
@@ -227,8 +242,8 @@ class StreamlinedOCRInpaintingService {
             const ocrResults = await this.getFullOCRResults(localImagePath);
             console.log(`OCR detected ${ocrResults.individualTexts.length} text elements`);
             
-            // STEP 5: Use Gemini to select which OCR texts belong to each field
-            console.log('Step 5: Gemini OCR text selection');
+            // STEP 5: Use Gemini to select which OCR texts belong to each field based on distance
+            console.log('Step 5: Gemini OCR text selection based on distance analysis');
             const geminiOCRSelection = await this.selectOCRTextsWithGemini(
                 localImagePath, 
                 ocrResults.individualTexts, 
@@ -240,8 +255,8 @@ class StreamlinedOCRInpaintingService {
                 throw new Error('Gemini could not select appropriate OCR texts for the detected fields');
             }
 
-            // STEP 6: Create mask based on Gemini's OCR text selection
-            console.log('Step 6: Creating mask from Gemini selection');
+            // STEP 6: Create mask based on distance analysis
+            console.log('Step 6: Creating mask based on distance analysis');
             const maskPath = await this.createMaskFromGeminiSelection(localImagePath, geminiOCRSelection.selectedFields, padding);
             tempFiles.push(maskPath);
             
@@ -282,16 +297,19 @@ class StreamlinedOCRInpaintingService {
                     completeText: field.completeText,
                     fieldPart: field.fieldPart,
                     valuePart: field.valuePart,
-                    context: field.context,
-                    confidence: field.confidence,
+                    hindiText: field.hindiText,
+                    distance: field.distance,
+                    distanceReason: field.distanceReason,
                     maskingStrategy: field.maskingStrategy,
-                    distance: field.distance
+                    textToMask: field.textToMask,
+                    context: field.context,
+                    confidence: field.confidence
                 })),
                 foundFields: geminiFieldDetection.autoDetectedFields,
                 geminiOCRSelection: geminiOCRSelection,
                 totalFound: geminiFieldDetection.autoDetectedFields.length,
-                removalType: "gemini_ocr_selection",
-                maskingType: "gemini_selected_areas"
+                removalType: "distance_based_masking",
+                maskingType: "unified_distance_strategy"
             };
             
             const endTime = Date.now();
@@ -307,15 +325,15 @@ class StreamlinedOCRInpaintingService {
                 highlightedImage: highlightedPath,
                 inpaintedImages: inpaintedPaths,
                 gcsResults: gcsResults,
-                method: "complete_gcs_workflow_4_samples",
+                method: "complete_gcs_workflow_4_samples_distance_based",
                 processingTime: processingTime,
                 workflowSteps: [
                     'gcs_download',
                     'image_validation',
-                    'gemini_field_detection',
+                    'gemini_field_detection_with_distance',
                     'google_vision_ocr',
-                    'gemini_ocr_selection',
-                    'mask_creation',
+                    'gemini_ocr_selection_distance_based',
+                    'distance_based_mask_creation',
                     'highlight_creation',
                     'imagen_inpainting',
                     'gcs_upload'
@@ -346,9 +364,9 @@ class StreamlinedOCRInpaintingService {
             throw error;
         } finally {
             // Clean up temporary files after a delay
-            setTimeout(() => {
-                this.cleanupFiles(tempFiles);
-            }, 10000); // 10 second delay to ensure all operations complete
+            // setTimeout(() => {
+            //     this.cleanupFiles(tempFiles);
+            // }, 10000); // 10 second delay to ensure all operations complete
         }
     }
 
@@ -435,14 +453,14 @@ class StreamlinedOCRInpaintingService {
     }
 
     /**
-     * Step 1: Use Gemini to automatically detect standard fields with retry logic
+     * Step 1: Use Gemini to automatically detect standard fields with distance analysis
      */
     async autoDetectStandardFields(imagePath, maxRetries = 3) {
         let lastError;
         
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                console.log(`Analyzing image with Gemini (attempt ${attempt}/${maxRetries})...`);
+                console.log(`Analyzing image with Gemini distance analysis (attempt ${attempt}/${maxRetries})...`);
                 
                 // Rate limiting
                 const timeSinceLastCall = Date.now() - this.lastGeminiCall;
@@ -455,39 +473,75 @@ class StreamlinedOCRInpaintingService {
                 const imageBase64 = imageBuffer.toString('base64');
                 
                 // Create comprehensive prompt for auto-detection with distance analysis
-                const prompt = `Analyze this product packaging image and automatically detect these 4 standard fields if they exist:
+                const prompt = `Analyze this product packaging image and automatically detect these 6 standard fields if they exist. Look for both English and Hindi versions of each field:
 
-1. MANUFACTURING DATE (variations: MFG DATE, MFG DT, MFG.DATE, MFGDATE, MANUFACTURING DATE, MANUFACTURED ON, MFD, MFG, PROD DATE, PRODUCTION DATE)
-2. EXPIRY DATE (variations: EXP DATE, EXP DT, EXP.DATE, EXPDATE, EXPIRY DATE, EXPIRE DATE, EXPIRES ON, EXP, BEST BEFORE, USE BY, VALID UNTIL)
-3. BATCH NUMBER (variations: BATCH NO, BATCH NO., BATCH NUMBER, B.NO, B.NO., BNO, BATCH, LOT NO, LOT NO., LOT NUMBER, LOT, BATCH CODE, LOT CODE)
-4. MRP (variations: MRP, M.R.P, M.R.P., MAX RETAIL PRICE, MAXIMUM RETAIL PRICE, RETAIL PRICE, PRICE, COST, RATE)
+**IMPORTANT**: When you find a field, also look for its Hindi translation that might appear next to it, below it, or nearby. Include Hindi text as part of the field detection.
 
-CRITICAL DISTANCE ANALYSIS: For each field found, analyze the visual distance between the field name and its value:
+1. **MANUFACTURING DATE**
+   - English: MFG DATE, MFG DT, MFG.DATE, MFGDATE, MANUFACTURING DATE, MANUFACTURED ON, MFD, MFG, PROD DATE, PRODUCTION DATE
+   - Hindi: उत्पादन तिथि, निर्माण तिथि, बनाने की तिथि, उत्पादन दिनांक, निर्माण दिनांक
 
-- **LOW DISTANCE** (field and value are directly connected/adjacent with no gap OR field is above its correspnding value with no gap): Both field name AND value should be masked for inpainting
-- **HIGH DISTANCE** (field and value are separated by significant spacing or in different columns): Only the VALUE should be masked for inpainting, keep the field name
+2. **EXPIRY DATE**
+   - English: EXP DATE, EXP DT, EXP.DATE, EXPDATE, EXPIRY DATE, EXPIRE DATE, EXPIRES ON, EXP, BEST BEFORE, USE BY, VALID UNTIL
+   - Hindi: समाप्ति तिथि, एक्सपायरी डेट, समाप्ति दिनांक, उपयोग करने की अंतिम तिथि, अवधि समाप्ति
 
-Examples of LOW DISTANCE (mask both field and value):
-- "B.No.SXG0306A" (field and value directly connected with no gap)
-- "MFG.Dt.02/2025" (field and value connected with dots with no gap)
-- "EXP.Dt.07/2026" (field and value connected directly with no gap)
-- "M.R.P.₹95.00" (field and value connected with symbol with no gap)
-- "MFG    (field is above its corresponding value with no gap) 
- 02/2024"
+3. **BATCH NUMBER**
+   - English: BATCH NO, BATCH NO., BATCH NUMBER, B.NO, B.NO., BNO, BATCH, LOT NO, LOT NO., LOT NUMBER, LOT, BATCH CODE, LOT CODE
+   - Hindi: बैच नंबर, बैच संख्या, लॉट संख्या, बैच कोड, लॉट नंबर
 
-Examples of HIGH DISTANCE (mask only value):
+4. **MRP (Maximum Retail Price)**
+   - English: MRP, M.R.P, M.R.P., MAX RETAIL PRICE, MAXIMUM RETAIL PRICE, RETAIL PRICE, PRICE, COST, RATE
+   - Hindi: अधिकतम खुदरा मूल्य, एमआरपी, खुदरा मूल्य, मूल्य, कीमत, दर
+
+5. **PACK SIZE** (can exist with or without field label)
+   - English Field Labels: PACK SIZE, PACK, SIZE, CONTENT, CONTENTS, NET CONTENT, NET CONTENTS, NET QTY, QUANTITY
+   - Hindi Field Labels: पैक साइज़, पैकेट का आकार, मात्रा, नेट मात्रा, कंटेंट
+   - Value Patterns (can exist standalone): "per 10 tablets", "per 20 capsules", "10 tablets", "20 capsules", "100ml", "250mg", "5gm", "1kg", "10x1", "strip of 10", "bottle of 50", "pack of 100", "box of 30"
+
+6. **INCLUSIVE OF TAXES**
+   - English: INCLUSIVE OF ALL TAXES, INCL OF ALL TAXES, INCL. OF ALL TAXES, INCLUSIVE OF TAXES, INCL OF TAXES, INCL. OF TAXES, IOAT, I.O.A.T, I.O.A.T., ALL TAXES INCLUDED, TAX INCLUSIVE, TAXES INCLUDED
+   - Hindi: सभी करों सहित, सभी कर शामिल, कर सहित, टैक्स सहित, सभी टैक्स शामिल
+
+**CRITICAL DISTANCE ANALYSIS**: For each field found, analyze the visual distance between the field name and its value:
+
+- **LOW DISTANCE** (field and value are directly connected/adjacent with no gap OR field is above its corresponding value with no gap): 
+  * **MASKING STRATEGY**: ALL fields and their values should be masked for inpainting
+  * **UNIFIED APPROACH**: If ANY field has low distance, mask ALL detected fields (MFG DATE, EXP DATE, BATCH NO, MRP, PACK SIZE, IOAT) and their values
+  * **PACK SIZE INCLUSION**: Always include pack size values (like "per 10 tablets") in masking
+  * **IOAT INCLUSION**: Include IOAT in masking (only for low distance scenarios)
+
+- **HIGH DISTANCE** (field and value are separated by significant spacing or in different columns): 
+  * **MASKING STRATEGY**: Only VALUES should be masked for inpainting, keep field names
+  * **UNIFIED APPROACH**: If ALL fields have high distance, mask only the VALUES of all detected fields
+  * **PACK SIZE INCLUSION**: Always include pack size values (like "per 10 tablets") in masking
+  * **IOAT EXCLUSION**: Do NOT include IOAT in masking (only included for low distance scenarios)
+
+**EXAMPLES OF LOW DISTANCE** (unified masking - ALL fields and values):
+- "B.No.SXG0306A" (field and value directly connected)
+- "MFG.Dt.02/2025" (field and value connected with dots)
+- "EXP.Dt.07/2026" (field and value connected directly)
+- "M.R.P.₹95.00" (field and value connected with symbol)
+- "MFG DATE: 02/2024" (field and value with minimal spacing)
+- "EXP Date
+   07/2025" (field is above value with no gap)
+
+**EXAMPLES OF HIGH DISTANCE** (values only masking):
 - "Mfg. Lic. No." in left column and "G/25/2150" in right column (separated by significant space)
 - "Batch No." in left column and "S24K016" in right column (tabular layout)
 - "Mfg. Date" in left column and "11/2024" in right column (separated layout)
 - "Max. Retail Price ₹" in left column and "69.00" in right column (split across columns)
 
-IMPORTANT: HIGH DISTANCE typically occurs in tabular layouts where field names are in one column and values are in another column, separated by significant whitespace or alignment gaps.
+**UNIFIED MASKING LOGIC**:
+- If ANY field has LOW distance → mask ALL fields and values + pack size values + IOAT
+- If ALL fields have HIGH distance → mask only VALUES of all fields + pack size values (NO IOAT)
+- Pack size values (like "per 10 tablets") are ALWAYS included in masking regardless of distance
+- IOAT is ONLY included when LOW distance is detected
 
 Instructions:
-1. Look for any variation of these 4 fields in the image
+1. Look for any variation of these 6 fields in the image
 2. For each field found, analyze the distance between field name and value
-3. Determine what should be masked based on distance analysis and give reason to support your decision.
-4. Return the masking strategy for each field
+3. Determine the unified masking strategy based on distance analysis
+4. Always include pack size values in masking
 
 Respond in JSON format:
 {
@@ -499,32 +553,33 @@ Respond in JSON format:
       "completeText": "MFG DATE: 12/2024",
       "fieldPart": "MFG DATE:",
       "valuePart": "12/2024",
+      "hindiText": "उत्पादन तिथि",
       "distance": "low",
       "distanceReason": "The field MFG DATE and value 12/2024 are directly connected with no gap",
-      "maskingStrategy": "both",
-      "textToMask": "MFG DATE: 12/2024",
-      "textToKeep": "",
-      "context": "found at bottom of package",
+      "maskingStrategy": "unified_all_fields_and_values",
+      "textToMask": "ALL fields and values + pack size values + IOAT",
+      "context": "found at bottom of package with Hindi translation",
       "confidence": "high"
     },
     {
-      "fieldType": "expiry_date",
-      "fieldName": "EXP DATE",
-      "completeText": "EXP DATE 01/2026",
-      "fieldPart": "EXP DATE",
-      "valuePart": "01/2026",
-      "distance": "high",
-      "distanceReason": "The field EXP DATE and value 01/2026 are separated by significant whitespace",
-      "maskingStrategy": "value_only",
-      "textToMask": "01/2026",
-      "textToKeep": "EXP DATE",
-      "context": "field and value are separated",
+      "fieldType": "pack_size",
+      "fieldName": "",
+      "completeText": "per 10 tablets",
+      "fieldPart": "",
+      "valuePart": "per 10 tablets",
+      "hindiText": "",
+      "distance": "standalone",
+      "distanceReason": "Pack size value without field label",
+      "maskingStrategy": "always_include_pack_size",
+      "textToMask": "per 10 tablets",
+      "context": "standalone pack size value",
       "confidence": "high"
     }
   ],
+  "unifiedMaskingStrategy": "all_fields_and_values", // or "values_only"
   "detectionConfidence": "high",
   "totalFound": 2,
-  "context": "Auto-detected standard fields with distance analysis"
+  "context": "Auto-detected standard fields with unified distance-based masking strategy"
 }`;
 
                 const imagePart = {
@@ -540,7 +595,7 @@ Respond in JSON format:
                 
                 this.lastGeminiCall = Date.now();
                 
-                console.log('Gemini raw response for auto field detection:', text);
+                console.log('Gemini raw response for auto field detection with distance:', text);
                 
                 // Parse JSON response
                 try {
@@ -549,8 +604,9 @@ Respond in JSON format:
                         const parsedResult = JSON.parse(jsonMatch[0]);
                         
                         if (parsedResult.found && parsedResult.autoDetectedFields && parsedResult.autoDetectedFields.length > 0) {
-                            console.log(`✅ Auto-detected ${parsedResult.autoDetectedFields.length} fields:`, 
+                            console.log(`✅ Auto-detected ${parsedResult.autoDetectedFields.length} fields with unified distance strategy:`, 
                                 parsedResult.autoDetectedFields.map(f => f.fieldType));
+                            console.log(`Unified masking strategy: ${parsedResult.unifiedMaskingStrategy}`);
                             return parsedResult;
                         }
                     }
@@ -572,7 +628,6 @@ Respond in JSON format:
                 
                 if (error.status === 503 || error.message.includes('overloaded')) {
                     if (attempt < maxRetries) {
-                        // Exponential backoff with jitter
                         const baseDelay = Math.pow(2, attempt) * 1000;
                         const jitter = Math.random() * 1000;
                         const waitTime = baseDelay + jitter;
@@ -594,115 +649,6 @@ Respond in JSON format:
         // If all retries failed, use OCR-only fallback
         console.log('All Gemini attempts failed, using OCR-only fallback...');
         return await this.fallbackFieldDetection(imagePath);
-    }
-
-    /**
-     * OCR-only fallback when Gemini is unavailable
-     */
-    async fallbackFieldDetection(imagePath) {
-        try {
-            console.log('Using OCR-only fallback for field detection...');
-            
-            const ocrResults = await this.getFullOCRResults(imagePath);
-            
-            if (!ocrResults.individualTexts || ocrResults.individualTexts.length === 0) {
-                throw new Error('No OCR text found in image');
-            }
-            
-            const detectedFields = [];
-            
-            for (const standardField of this.STANDARD_FIELDS) {
-                const fieldType = standardField.fieldType;
-                const variations = standardField.commonVariations;
-                
-                for (const ocrText of ocrResults.individualTexts) {
-                    const textUpper = ocrText.text.toUpperCase();
-                    
-                    for (const variation of variations) {
-                        if (textUpper.includes(variation)) {
-                            const fieldValue = this.findNearbyValue(ocrText, ocrResults.individualTexts);
-                            const completeText = `${ocrText.text}${fieldValue ? ' ' + fieldValue : ''}`;
-                            
-                            // Distance analysis for fallback - check if field and value are connected
-                            const isConnected = completeText.includes(variation) && !completeText.includes(' : ') && !completeText.includes('  ');
-                            const distance = isConnected ? 'low' : 'high';
-                            const maskingStrategy = distance === 'low' ? 'both' : 'value_only';
-                            const textToMask = maskingStrategy === 'both' ? completeText : fieldValue;
-                            
-                            detectedFields.push({
-                                fieldType: fieldType,
-                                fieldName: variation,
-                                completeText: completeText,
-                                fieldPart: ocrText.text,
-                                valuePart: fieldValue || '',
-                                distance: distance,
-                                distanceReason: `OCR fallback analysis - ${distance} distance detected`,
-                                maskingStrategy: maskingStrategy,
-                                textToMask: textToMask,
-                                textToKeep: maskingStrategy === 'value_only' ? ocrText.text : '',
-                                context: "OCR fallback detection",
-                                confidence: "medium",
-                                coordinates: ocrText.coordinates
-                            });
-                            break;
-                        }
-                    }
-                    
-                    if (detectedFields.find(f => f.fieldType === fieldType)) {
-                        break;
-                    }
-                }
-            }
-            
-            return {
-                found: detectedFields.length > 0,
-                autoDetectedFields: detectedFields,
-                detectionConfidence: detectedFields.length > 2 ? "high" : detectedFields.length > 0 ? "medium" : "low",
-                totalFound: detectedFields.length,
-                context: "OCR fallback detection completed"
-            };
-            
-        } catch (error) {
-            console.error('Error in OCR fallback detection:', error);
-            return {
-                found: false,
-                autoDetectedFields: [],
-                detectionConfidence: "low",
-                totalFound: 0,
-                context: "OCR fallback detection failed"
-            };
-        }
-    }
-
-    /**
-     * Helper method to find nearby value text for a field
-     */
-    findNearbyValue(fieldText, allTexts) {
-        const fieldCoords = fieldText.coordinates;
-        const fieldCenterX = fieldCoords.reduce((sum, coord) => sum + coord.x, 0) / fieldCoords.length;
-        const fieldCenterY = fieldCoords.reduce((sum, coord) => sum + coord.y, 0) / fieldCoords.length;
-        
-        const nearbyTexts = allTexts.filter(text => {
-            if (text.id === fieldText.id) return false;
-            
-            const textCoords = text.coordinates;
-            const textCenterX = textCoords.reduce((sum, coord) => sum + coord.x, 0) / textCoords.length;
-            const textCenterY = textCoords.reduce((sum, coord) => sum + coord.y, 0) / textCoords.length;
-            
-            const distance = Math.sqrt(
-                Math.pow(textCenterX - fieldCenterX, 2) + 
-                Math.pow(textCenterY - fieldCenterY, 2)
-            );
-            
-            return distance < 100;
-        });
-        
-        const valueText = nearbyTexts.find(text => {
-            const textStr = text.text.trim();
-            return /\d/.test(textStr) || textStr.length > 2;
-        });
-        
-        return valueText ? valueText.text : null;
     }
 
     /**
@@ -742,11 +688,11 @@ Respond in JSON format:
     }
 
     /**
-     * Step 3: Use Gemini to select which OCR texts belong to each detected field (with distance-based masking)
+     * Step 3: Use Gemini to select which OCR texts belong to each field based on distance analysis
      */
     async selectOCRTextsWithGemini(imagePath, ocrTexts, detectedFields) {
         try {
-            console.log('Using Gemini to select OCR texts for detected fields with visual context, distance-based masking, and OCR error handling...');
+            console.log('Using Gemini to select OCR texts with unified distance-based masking...');
             
             // Rate limiting
             const timeSinceLastCall = Date.now() - this.lastGeminiCall;
@@ -757,40 +703,45 @@ Respond in JSON format:
             const imageBuffer = fs.readFileSync(imagePath);
             const imageBase64 = imageBuffer.toString('base64');
             
-            const prompt = `You are an expert at analyzing OCR results from product packaging. I'm providing you with the ACTUAL IMAGE and OCR data to help you make accurate field-to-value associations, especially when OCR has errors or incomplete text detection.
+            // Determine the unified masking strategy
+            const unifiedStrategy = detectedFields[0]?.maskingStrategy || 'unified_all_fields_and_values';
+            
+            const prompt = `You are an expert at analyzing OCR results from product packaging. I need you to select OCR texts based on UNIFIED DISTANCE-BASED MASKING strategy.
 
-VISUAL CONTEXT: Look at the image to understand the layout, spacing, and visual relationships between text elements.
+**UNIFIED MASKING STRATEGY**: ${unifiedStrategy}
 
-1. DETECTED FIELDS with distance analysis from previous step:
-${detectedFields.map(field => `   - Field: ${field.fieldName} | Text to Mask: "${field.textToMask}" | Strategy: ${field.maskingStrategy} | Distance: ${field.distance} | Reason: ${field.distanceReason}`).join('\n')}
+**STRATEGY EXPLANATION**:
+- If "unified_all_fields_and_values": Select OCR texts for ALL field names AND their values + pack size values
+- If "values_only": Select OCR texts for VALUES only + pack size values
+- Pack size values (like "per 10 tablets") are ALWAYS included regardless of strategy
+
+1. DETECTED FIELDS with distance analysis:
+${detectedFields.map(field => `   - Field: ${field.fieldName} | Complete: "${field.completeText}" | Distance: ${field.distance} | Strategy: ${field.maskingStrategy} | Hindi: "${field.hindiText || 'None'}"`).join('\n')}
 
 2. ALL OCR TEXTS from the image with their IDs:
 ${ocrTexts.map(text => `   ID: ${text.id} | Text: "${text.text}"`).join('\n')}
 
-YOUR TASK: 
-1. **VISUALLY EXAMINE** the image to see the actual layout and positioning of text elements
-2. **MATCH** each detected field with its corresponding OCR text IDs based on visual proximity and logical association
-3. **HANDLE OCR ERRORS** using intelligent proximity-based reconstruction
-4. **APPLY** the correct masking strategy based on the distance analysis from step 1
+**UNIFIED SELECTION RULES**:
 
-ENHANCED MASKING RULES:
-- **"both"** strategy (low distance): Select OCR texts for both field name AND value when they are visually connected
-- **"value_only"** strategy (high distance): Select OCR texts ONLY for the value part when field and value are visually separated
+**If Strategy = "unified_all_fields_and_values"**:
+- Select OCR texts for ALL field names (including Hindi if present)
+- Select OCR texts for ALL field values
+- Select OCR texts for pack size values (like "per 10 tablets")
+- Select OCR texts for IOAT (only in low distance scenarios)
+- Include everything related to detected fields
 
-VISUAL ANALYSIS INSTRUCTIONS:
-- Look at the spatial relationships between text elements in the image
-- Identify which OCR text IDs correspond to field names vs. values
-- Consider text alignment, proximity, and logical grouping
-- Use the visual context to resolve ambiguities in OCR text matching
+**If Strategy = "values_only"**:
+- Skip field names, select only VALUES
+- Select OCR texts for manufacturing date VALUE
+- Select OCR texts for expiry date VALUE  
+- Select OCR texts for batch number VALUE
+- Select OCR texts for MRP VALUE
+- Select OCR texts for pack size VALUE (like "per 10 tablets")
+- DO NOT select IOAT (only included in low distance scenarios)
 
 **CRITICAL: OCR ERROR HANDLING AND PROXIMITY-BASED RECONSTRUCTION**
 
 OCR systems often make errors or fail to detect complete text. When this happens, use intelligent analysis:
-
-**SCENARIO: Incomplete Value Detection**
-- If you expect a date like "03/2024" but only find "03" in OCR text
-- Look for nearby OCR texts that could be the missing parts ("/" and "2024")
-- Check OCR texts positioned close to "03" for potential matches
 
 **RECONSTRUCTION RULES:**
 1. **Missing Separators**: If expecting "03/2024" but find "03" and "2024" separately, select both IDs
@@ -799,64 +750,55 @@ OCR systems often make errors or fail to detect complete text. When this happens
 4. **Proximity Logic**: If "03" is detected, look for nearby numbers that could form a date (like "2024", "24", "04", etc.)
 5. **Pattern Matching**: Use visual positioning to identify logical groupings (dates, batch numbers, prices)
 
-**INTELLIGENT PROXIMITY ANALYSIS:**
-- **Horizontal Proximity**: Check OCR texts in the same horizontal line or very close vertically
-- **Visual Grouping**: Look for texts that appear visually grouped together in the image
-- **Logical Completion**: If you see "03" near field "MFG DATE", look for year components nearby
-- **Missing Characters**: OCR might miss ".", "/", "-", ":" - look for numbers that could complete the pattern
+**EXAMPLES**:
 
-**EXAMPLES OF OCR ERROR SCENARIOS:**
+**LOW DISTANCE EXAMPLE (unified_all_fields_and_values)**:
+- Select: "MFG.DATE", ":", "03", "/", "2024" (field + value)
+- Select: "EXP.DATE", ":", "07", "/", "2026" (field + value)
+- Select: "B.NO", ".", "ABC123" (field + value)
+- Select: "MRP", "₹", "95", ".", "00" (field + value)
+- Select: "per", "10", "tablets" (pack size value)
+- Select: "IOAT" (tax inclusion - only in low distance)
 
-1. **Expected**: "03/2024" | **OCR Found**: ["03", "2024"] | **Action**: Select both IDs
-2. **Expected**: "MFG.DT:03/2024" | **OCR Found**: ["MFG.DT", "03", "2024"] | **Action**: Select all three IDs
-3. **Expected**: "B.NO.ABC123" | **OCR Found**: ["B.NO", "ABC", "123"] | **Action**: Select all three IDs
-4. **Expected**: "₹95.00" | **OCR Found**: ["₹", "95", "00"] | **Action**: Select all three IDs
-5. **Expected**: "EXP:12-2025" | **OCR Found**: ["EXP", "12", "2025"] | **Action**: Based on strategy - if "both", select all; if "value_only", select ["12", "2025"]
-
-**ADVANCED PATTERN RECOGNITION:**
-- **Dates**: Look for number combinations that form valid dates (MM/YY, MM/YYYY, DD/MM/YY)
-- **Batch Numbers**: Alphanumeric combinations near "BATCH", "LOT", "B.NO"
-- **Prices**: Number combinations near "MRP", "PRICE", currency symbols
-- **Codes**: Letter-number combinations that appear to be product codes
-
-IMPORTANT MATCHING CRITERIA:
-- For "both" strategy: Find ALL OCR texts that form the complete field-value pair, even if fragmented
-- For "value_only" strategy: Find ALL value-related OCR texts, reconstructing from fragments if needed
-- Use visual positioning and logical patterns to group fragmented text
-- When in doubt, include nearby OCR texts that could logically belong to the field value
+**HIGH DISTANCE EXAMPLE (values_only)**:
+- Skip: "MFG.DATE", Select: "03", "/", "2024" (value only)
+- Skip: "EXP.DATE", Select: "07", "/", "2026" (value only)
+- Skip: "B.NO", Select: "ABC123" (value only)
+- Skip: "MRP", Select: "₹", "95", ".", "00" (value only)
+- Select: "per", "10", "tablets" (pack size value - always included)
+- Skip: "IOAT" (not included in high distance scenarios)
 
 Respond in JSON format:
 {
   "success": true,
+  "unifiedStrategy": "${unifiedStrategy}",
   "selectedFields": [
     {
       "fieldType": "manufacturing_date",
-      "fieldName": "Mfg.Date",
-      "completeText": "Mfg.Date:03/2024",
-      "maskingStrategy": "both",
-      "textToMask": "Mfg.Date:03/2024",
-      "selectedOCRIds": [5, 6, 7, 8],
-      "reasoning": "Both strategy - field and value are connected. Reconstructed complete date from fragments",
-      "visualAnalysis": "Field 'Mfg.Date' followed by fragments '03', '/', '2024' in close proximity",
-      "ocrReconstruction": "Combined OCR fragments: 'Mfg.Date' (ID 5) + '03' (ID 6) + '/' (ID 7) + '2024' (ID 8) to form complete date"
+      "fieldName": "MFG.DATE",
+      "completeText": "MFG.DATE: 03/2024",
+      "selectedOCRIds": [5, 6, 7, 8, 9],
+      "reasoning": "Selected field name and value fragments based on unified strategy",
+      "textParts": ["MFG.DATE", ":", "03", "/", "2024"],
+      "hindiIncluded": true,
+      "hindiText": "उत्पादन तिथि"
     },
     {
-      "fieldType": "batch_number",
-      "fieldName": "B.NO",
-      "completeText": "B.NO ABC123",
-      "maskingStrategy": "value_only",
-      "textToMask": "ABC123",
-      "selectedOCRIds": [12, 13],
-      "reasoning": "Value only strategy - reconstructed batch number from nearby fragments",
-      "visualAnalysis": "Field 'B.NO' in left column, value fragments 'ABC' and '123' in right column",
-      "ocrReconstruction": "Combined nearby OCR texts 'ABC' (ID 12) + '123' (ID 13) to form complete batch number"
+      "fieldType": "pack_size",
+      "fieldName": "",
+      "completeText": "per 10 tablets",
+      "selectedOCRIds": [15, 16, 17],
+      "reasoning": "Pack size value always included regardless of strategy",
+      "textParts": ["per", "10", "tablets"],
+      "hindiIncluded": false,
+      "hindiText": ""
     }
   ],
-  "totalSelectedTexts": 6,
+  "totalSelectedTexts": 8,
   "confidence": "high",
   "visualContextUsed": true,
   "ocrErrorHandling": true,
-  "reconstructedFields": 2
+  "unifiedMaskingApplied": true
 }`;
 
             const imagePart = {
@@ -872,7 +814,7 @@ Respond in JSON format:
             
             this.lastGeminiCall = Date.now();
             
-            console.log('Gemini OCR selection with visual context and OCR error handling - raw response:', text);
+            console.log('Gemini OCR selection with unified distance strategy - raw response:', text);
             
             try {
                 const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -881,18 +823,10 @@ Respond in JSON format:
                     
                     if (parsedResult.success && parsedResult.selectedFields && parsedResult.selectedFields.length > 0) {
                         const enrichedSelection = this.enrichGeminiSelection(parsedResult, ocrTexts);
-                        console.log('✅ Gemini successfully selected OCR texts using visual context and OCR error handling');
-                        console.log(`Visual analysis confidence: ${parsedResult.confidence}`);
-                        console.log(`OCR error handling enabled: ${parsedResult.ocrErrorHandling}`);
-                        console.log(`Reconstructed fields: ${parsedResult.reconstructedFields || 0}`);
-                        console.log(`Selected fields with enhanced analysis: ${parsedResult.selectedFields.length}`);
-                        
-                        // Log OCR reconstruction details
-                        parsedResult.selectedFields.forEach(field => {
-                            if (field.ocrReconstruction) {
-                                console.log(`📝 OCR Reconstruction for ${field.fieldName}: ${field.ocrReconstruction}`);
-                            }
-                        });
+                        console.log('✅ Gemini successfully selected OCR texts with unified distance strategy');
+                        console.log(`Unified strategy applied: ${parsedResult.unifiedStrategy}`);
+                        console.log(`Selected fields: ${parsedResult.selectedFields.length}`);
+                        console.log(`Total OCR texts selected: ${parsedResult.totalSelectedTexts}`);
                         
                         return enrichedSelection;
                     }
@@ -905,17 +839,17 @@ Respond in JSON format:
             return fallbackSelection;
             
         } catch (error) {
-            console.error('Error in Gemini OCR text selection with visual context and error handling:', error);
+            console.error('Error in Gemini OCR text selection with unified distance strategy:', error);
             return this.createFallbackOCRSelection(detectedFields, ocrTexts);
         }
     }
 
     /**
-     * Step 4: Create mask based on Gemini's OCR text selection (with distance-based masking)
+     * Step 4: Create mask based on Gemini's OCR text selection with unified distance strategy
      */
     async createMaskFromGeminiSelection(imagePath, selectedFields, padding = 5) {
         try {
-            console.log('Creating mask from Gemini OCR selection with distance-based masking...');
+            console.log('Creating mask from Gemini OCR selection with unified distance strategy...');
             
             const imageMetadata = await sharp(imagePath).metadata();
             const { width, height } = imageMetadata;
@@ -945,8 +879,7 @@ Respond in JSON format:
                 const maskWidth = maxX - minX;
                 const maskHeight = maxY - minY;
                 
-                const strategy = field.maskingStrategy || 'both';
-                console.log(`Creating mask for ${field.fieldName} (${strategy} strategy): ${maskWidth}x${maskHeight} at (${minX}, ${minY})`);
+                console.log(`Creating mask for ${field.fieldName} (${field.fieldType}): ${maskWidth}x${maskHeight} at (${minX}, ${minY})`);
                 
                 const whiteRect = await sharp({
                     create: {
@@ -970,14 +903,14 @@ Respond in JSON format:
                 .png()
                 .toBuffer();
             
-            const maskPath = imagePath.replace(path.extname(imagePath), '_distance_based_mask.png');
+            const maskPath = imagePath.replace(path.extname(imagePath), '_unified_distance_mask.png');
             fs.writeFileSync(maskPath, finalMaskBuffer);
             
-            console.log(`Distance-based mask saved to: ${maskPath}`);
+            console.log(`Unified distance-based mask saved to: ${maskPath}`);
             return maskPath;
             
         } catch (error) {
-            console.error('Error creating distance-based mask from Gemini selection:', error);
+            console.error('Error creating unified distance mask from Gemini selection:', error);
             throw error;
         }
     }
@@ -1031,7 +964,7 @@ Respond in JSON format:
                     blend: 'over'
                 });
                 
-                console.log(`Created highlight for ${field.fieldName} with ${field.selectedTexts.length} OCR texts`);
+                console.log(`Created highlight for ${field.fieldName} (${field.fieldType}) with ${field.selectedTexts.length} OCR texts`);
             }
             
             const highlightedBuffer = await imageProcessor
@@ -1039,10 +972,10 @@ Respond in JSON format:
                 .png()
                 .toBuffer();
             
-            const highlightedPath = imagePath.replace(path.extname(imagePath), '_gemini_selection_highlighted.png');
+            const highlightedPath = imagePath.replace(path.extname(imagePath), '_unified_distance_highlighted.png');
             fs.writeFileSync(highlightedPath, highlightedBuffer);
             
-            console.log(`Gemini selection highlight saved to: ${highlightedPath}`);
+            console.log(`Unified distance highlight saved to: ${highlightedPath}`);
             return highlightedPath;
             
         } catch (error) {
@@ -1175,6 +1108,142 @@ Respond in JSON format:
      */
 
     /**
+     * OCR-only fallback when Gemini is unavailable
+     */
+    async fallbackFieldDetection(imagePath) {
+        try {
+            console.log('Using OCR-only fallback for field detection...');
+            
+            const ocrResults = await this.getFullOCRResults(imagePath);
+            
+            if (!ocrResults.individualTexts || ocrResults.individualTexts.length === 0) {
+                throw new Error('No OCR text found in image');
+            }
+            
+            const detectedFields = [];
+            
+            for (const standardField of this.STANDARD_FIELDS) {
+                const fieldType = standardField.fieldType;
+                const variations = [...standardField.commonVariations, ...(standardField.hindiVariations || [])];
+                
+                for (const ocrText of ocrResults.individualTexts) {
+                    const textUpper = ocrText.text.toUpperCase();
+                    
+                    for (const variation of variations) {
+                        if (textUpper.includes(variation.toUpperCase())) {
+                            const fieldValue = this.findNearbyValue(ocrText, ocrResults.individualTexts);
+                            const completeText = `${ocrText.text}${fieldValue ? ' ' + fieldValue : ''}`;
+                            
+                            // Default fallback distance analysis
+                            const isConnected = !completeText.includes('  ') && !completeText.includes(' : ');
+                            const distance = isConnected ? 'low' : 'high';
+                            const maskingStrategy = distance === 'low' ? 'unified_all_fields_and_values' : 'values_only';
+                            
+                            detectedFields.push({
+                                fieldType: fieldType,
+                                fieldName: variation,
+                                completeText: completeText,
+                                fieldPart: ocrText.text,
+                                valuePart: fieldValue || '',
+                                hindiText: '',
+                                distance: distance,
+                                distanceReason: `OCR fallback analysis - ${distance} distance detected`,
+                                maskingStrategy: maskingStrategy,
+                                textToMask: maskingStrategy === 'unified_all_fields_and_values' ? 'ALL fields and values + pack size + IOAT' : 'VALUES only + pack size (NO IOAT)',
+                                context: "OCR fallback detection",
+                                confidence: "medium",
+                                coordinates: ocrText.coordinates
+                            });
+                            break;
+                        }
+                    }
+                    
+                    if (detectedFields.find(f => f.fieldType === fieldType)) {
+                        break;
+                    }
+                }
+            }
+            
+            // Special handling for pack size patterns
+            if (!detectedFields.find(f => f.fieldType === 'pack_size')) {
+                const packSizePattern = /per \d+ (tablets?|capsules?|pills?)|^\d+ (tablets?|capsules?|pills?)|^\d+\s*(ml|mg|gm?|kg)/i;
+                
+                for (const ocrText of ocrResults.individualTexts) {
+                    if (packSizePattern.test(ocrText.text)) {
+                        detectedFields.push({
+                            fieldType: 'pack_size',
+                            fieldName: '',
+                            completeText: ocrText.text,
+                            fieldPart: '',
+                            valuePart: ocrText.text,
+                            hindiText: '',
+                            distance: 'standalone',
+                            distanceReason: 'Pack size value without field label',
+                            maskingStrategy: 'always_include_pack_size',
+                            textToMask: ocrText.text,
+                            context: "OCR fallback pack size pattern detection",
+                            confidence: "medium",
+                            coordinates: ocrText.coordinates
+                        });
+                        break;
+                    }
+                }
+            }
+            
+            return {
+                found: detectedFields.length > 0,
+                autoDetectedFields: detectedFields,
+                unifiedMaskingStrategy: detectedFields.length > 0 && detectedFields[0].maskingStrategy,
+                detectionConfidence: detectedFields.length > 2 ? "high" : detectedFields.length > 0 ? "medium" : "low",
+                totalFound: detectedFields.length,
+                context: "OCR fallback detection completed"
+            };
+            
+        } catch (error) {
+            console.error('Error in OCR fallback detection:', error);
+            return {
+                found: false,
+                autoDetectedFields: [],
+                unifiedMaskingStrategy: 'values_only',
+                detectionConfidence: "low",
+                totalFound: 0,
+                context: "OCR fallback detection failed"
+            };
+        }
+    }
+
+    /**
+     * Helper method to find nearby value text for a field
+     */
+    findNearbyValue(fieldText, allTexts) {
+        const fieldCoords = fieldText.coordinates;
+        const fieldCenterX = fieldCoords.reduce((sum, coord) => sum + coord.x, 0) / fieldCoords.length;
+        const fieldCenterY = fieldCoords.reduce((sum, coord) => sum + coord.y, 0) / fieldCoords.length;
+        
+        const nearbyTexts = allTexts.filter(text => {
+            if (text.id === fieldText.id) return false;
+            
+            const textCoords = text.coordinates;
+            const textCenterX = textCoords.reduce((sum, coord) => sum + coord.x, 0) / textCoords.length;
+            const textCenterY = textCoords.reduce((sum, coord) => sum + coord.y, 0) / textCoords.length;
+            
+            const distance = Math.sqrt(
+                Math.pow(textCenterX - fieldCenterX, 2) + 
+                Math.pow(textCenterY - fieldCenterY, 2)
+            );
+            
+            return distance < 100;
+        });
+        
+        const valueText = nearbyTexts.find(text => {
+            const textStr = text.text.trim();
+            return /\d/.test(textStr) || textStr.length > 2;
+        });
+        
+        return valueText ? valueText.text : null;
+    }
+
+    /**
      * Fallback method to extract standard fields from Gemini text response
      */
     extractStandardFieldsFromText(text) {
@@ -1185,13 +1254,13 @@ Respond in JSON format:
         
         for (const standardField of this.STANDARD_FIELDS) {
             const fieldType = standardField.fieldType;
-            const variations = standardField.commonVariations;
+            const variations = [...standardField.commonVariations, ...(standardField.hindiVariations || [])];
             
             for (const line of lines) {
                 const upperLine = line.toUpperCase();
                 
                 for (const variation of variations) {
-                    if (upperLine.includes(variation)) {
+                    if (upperLine.includes(variation.toUpperCase())) {
                         const fieldPatterns = [
                             new RegExp(`${variation.replace(/\./g, '\\.')}\\s*:?\\s*[^\\n]*`, 'i'),
                             new RegExp(`${variation.replace(/\./g, '\\.')}[:\\s]+[^\\s][^\\n]*`, 'i')
@@ -1207,7 +1276,7 @@ Respond in JSON format:
                                     // Default fallback distance analysis
                                     const isConnected = !completeText.includes('  ') && !completeText.includes(' : ');
                                     const distance = isConnected ? 'low' : 'high';
-                                    const maskingStrategy = distance === 'low' ? 'both' : 'value_only';
+                                    const maskingStrategy = distance === 'low' ? 'unified_all_fields_and_values' : 'values_only';
                                     
                                     autoDetectedFields.push({
                                         fieldType: fieldType,
@@ -1215,11 +1284,11 @@ Respond in JSON format:
                                         completeText: completeText,
                                         fieldPart: variation,
                                         valuePart: valuePart,
+                                        hindiText: '',
                                         distance: distance,
                                         distanceReason: `Fallback analysis - ${distance} distance detected`,
                                         maskingStrategy: maskingStrategy,
-                                        textToMask: maskingStrategy === 'both' ? completeText : valuePart,
-                                        textToKeep: maskingStrategy === 'value_only' ? variation : '',
+                                        textToMask: maskingStrategy === 'unified_all_fields_and_values' ? 'ALL fields and values + pack size + IOAT' : 'VALUES only + pack size (NO IOAT)',
                                         context: "Extracted from text response",
                                         confidence: "medium"
                                     });
@@ -1243,6 +1312,7 @@ Respond in JSON format:
         return {
             found: autoDetectedFields.length > 0,
             autoDetectedFields: autoDetectedFields,
+            unifiedMaskingStrategy: autoDetectedFields.length > 0 ? autoDetectedFields[0].maskingStrategy : 'values_only',
             detectionConfidence: autoDetectedFields.length > 2 ? "high" : autoDetectedFields.length > 0 ? "medium" : "low",
             totalFound: autoDetectedFields.length,
             context: "Fallback extraction from text response"
@@ -1272,11 +1342,13 @@ Respond in JSON format:
                     fieldType: field.fieldType,
                     fieldName: field.fieldName,
                     completeText: field.completeText,
-                    maskingStrategy: field.maskingStrategy,
                     selectedOCRIds: field.selectedOCRIds,
                     selectedTexts: selectedTexts,
                     combinedCoordinates: this.combineCoordinates(selectedTexts.map(t => t.coordinates)),
                     reasoning: field.reasoning,
+                    textParts: field.textParts || [],
+                    hindiIncluded: field.hindiIncluded || false,
+                    hindiText: field.hindiText || '',
                     confidence: "high"
                 });
             }
@@ -1284,10 +1356,14 @@ Respond in JSON format:
         
         return {
             success: true,
+            unifiedStrategy: geminiSelection.unifiedStrategy,
             selectedFields: enrichedFields,
             totalSelectedTexts: enrichedFields.reduce((sum, field) => sum + field.selectedTexts.length, 0),
             confidence: geminiSelection.confidence,
-            method: "gemini_ocr_selection"
+            method: "gemini_unified_distance_selection",
+            visualContextUsed: geminiSelection.visualContextUsed,
+            ocrErrorHandling: geminiSelection.ocrErrorHandling,
+            unifiedMaskingApplied: geminiSelection.unifiedMaskingApplied
         };
     }
 
@@ -1314,11 +1390,13 @@ Respond in JSON format:
                     fieldType: field.fieldType,
                     fieldName: field.fieldName,
                     completeText: field.completeText,
-                    maskingStrategy: field.maskingStrategy || 'both',
                     selectedOCRIds: matchingTexts.map(t => t.id),
                     selectedTexts: matchingTexts,
                     combinedCoordinates: this.combineCoordinates(matchingTexts.map(t => t.coordinates)),
                     reasoning: "Fallback text matching",
+                    textParts: matchingTexts.map(t => t.text),
+                    hindiIncluded: false,
+                    hindiText: '',
                     confidence: "medium"
                 });
             }
@@ -1326,10 +1404,14 @@ Respond in JSON format:
         
         return {
             success: fallbackFields.length > 0,
+            unifiedStrategy: detectedFields.length > 0 ? detectedFields[0].maskingStrategy : 'values_only',
             selectedFields: fallbackFields,
             totalSelectedTexts: fallbackFields.reduce((sum, field) => sum + field.selectedTexts.length, 0),
             confidence: "medium",
-            method: "fallback_selection"
+            method: "fallback_selection",
+            visualContextUsed: false,
+            ocrErrorHandling: false,
+            unifiedMaskingApplied: false
         };
     }
 
@@ -1338,6 +1420,8 @@ Respond in JSON format:
      */
     combineCoordinates(coordinateArrays) {
         const allCoords = coordinateArrays.flat();
+        
+        if (allCoords.length === 0) return [];
         
         const xs = allCoords.map(coord => coord.x);
         const ys = allCoords.map(coord => coord.y);
