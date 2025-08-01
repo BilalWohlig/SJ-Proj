@@ -611,6 +611,20 @@ Respond in JSON format:
       "confidence": "high"
     },
     {
+      "fieldType": "manufacturing_date",
+      "fieldName": "EXP DATE",
+      "completeText": "EXP DATE: 02/2026",
+      "fieldPart": "EXP DATE:",
+      "valuePart": "02/2026",
+      "hindiText": "समाप्ति तिथि",
+      "distance": "high",
+      "distanceReason": "The field EXP DATE and value 02/2026 are separated by significant space or in different columns indicating a tabular layout",
+      "maskingStrategy": "values_only",
+      "textToMask": "ALL values + pack size values",
+      "context": "found at bottom of package with Hindi translation",
+      "confidence": "high"
+    },
+    {
       "fieldType": "pack_size",
       "fieldName": "",
       "completeText": "per 10 tablets",
