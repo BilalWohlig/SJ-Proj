@@ -699,7 +699,7 @@ class ProductService {
         : "https://sandbox.cashfree.com";
     const clientId = process.env.CF_CLIENT_ID;
     const clientSecret = process.env.CF_CLIENT_SECRET;
-    const apiVersion = "2023-08-01";
+    const apiVersion = process.env.API_VERSION;
     const returnUrl = `https://wa.me/${whatsappNumber}`;
     const expiryTime = moment()
       .add(expiry_time, "m")
